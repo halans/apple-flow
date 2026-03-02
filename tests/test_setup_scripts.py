@@ -30,6 +30,14 @@ def test_setup_scripts_include_gemini_connector_option():
     assert "apple_flow_gemini_cli_command" in beginner_content
 
 
+def test_setup_scripts_include_ollama_connector_option():
+    setup_content = _read("scripts/setup_autostart.sh")
+    beginner_content = _read("scripts/start_beginner.sh")
+    assert "ollama" in setup_content
+    assert "apple_flow_ollama_base_url" in setup_content
+    assert "apple_flow_ollama_base_url" in beginner_content
+
+
 def test_launchd_path_includes_local_bin_fallback():
     setup_content = _read("scripts/setup_autostart.sh")
     install_content = _read("scripts/install_autostart.sh")

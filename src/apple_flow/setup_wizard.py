@@ -93,6 +93,8 @@ def generate_env(
         "apple_flow_claude_cli_command": connector_command if connector == "claude-cli" else "claude",
         "apple_flow_gemini_cli_command": connector_command if connector == "gemini-cli" else "gemini",
         "apple_flow_cline_command": connector_command if connector == "cline" else "cline",
+        "apple_flow_ollama_base_url": "http://127.0.0.1:11434",
+        "apple_flow_ollama_model": "qwen3.5:4b",
         "apple_flow_only_poll_allowed_senders": "true",
         "apple_flow_require_chat_prefix": "false",
         "apple_flow_approval_ttl_minutes": "20",
@@ -201,6 +203,7 @@ def _choose_connector() -> tuple[str, str]:
         ("codex-cli", "Codex CLI", "codex"),
         ("gemini-cli", "Gemini CLI", "gemini"),
         ("cline", "Cline CLI", "cline"),
+        ("ollama", "Ollama (local native API)", ""),
     ]
     print("\nChoose your AI connector:")
     for idx, (_, label, _) in enumerate(options, 1):
@@ -216,6 +219,8 @@ def _choose_connector() -> tuple[str, str]:
             print("  Invalid selection.")
             continue
         connector_key, _, binary = options[index - 1]
+        if connector_key == "ollama":
+            return connector_key, ""
         resolved = resolve_binary(binary)
         if not resolved:
             print(f"\nCould not find `{binary}` in PATH or common install locations.")

@@ -107,6 +107,26 @@ def test_wizard_generate_env_supports_gemini_connector(capsys, tmp_path, monkeyp
     assert "apple_flow_gemini_cli_command=gemini" in payload["env_preview"]
 
 
+def test_wizard_generate_env_supports_ollama_without_connector_command(capsys, tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    args = _args(
+        tool_args=["generate-env"],
+        phone="+15551234567",
+        connector="ollama",
+        connector_command="",
+        workspace=str(workspace),
+        gateways="",
+    )
+    code = cli_control.run_cli_control("wizard", args)
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert "apple_flow_connector=ollama" in payload["env_preview"]
+    assert "apple_flow_ollama_model=qwen3.5:4b" in payload["env_preview"]
+
+
 def test_wizard_generate_env_supports_custom_gateway_names(capsys, tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

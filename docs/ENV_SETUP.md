@@ -35,7 +35,7 @@ Pick one AI backend. The value of `apple_flow_connector` determines which is use
 
 | Variable | Default | Options / Description |
 |---|---|---|
-| `apple_flow_connector` | `codex-cli` | `codex-cli` — uses `codex exec` (requires `codex login`)<br>`claude-cli` — uses `claude -p` (requires `claude auth login`)<br>`gemini-cli` — uses `gemini -p` (requires `gemini auth login`)<br>`cline` — uses `cline -y` (supports multiple model providers) |
+| `apple_flow_connector` | `codex-cli` | `codex-cli` — uses `codex exec` (requires `codex login`)<br>`claude-cli` — uses `claude -p` (requires `claude auth login`)<br>`gemini-cli` — uses `gemini -p` (requires `gemini auth login`)<br>`kilo-cli` — uses `kilo run --auto` (requires Kilo auth/configuration)<br>`cline` — uses `cline -y` (supports multiple model providers)<br>`ollama` — native `/api/chat` connector (requires Ollama server) |
 
 ### Codex CLI settings (`connector=codex-cli`)
 
@@ -64,6 +64,14 @@ Pick one AI backend. The value of `apple_flow_connector` determines which is use
 | `apple_flow_gemini_cli_model` | `gemini-3-flash-preview` | Model flag passed to gemini. |
 | `apple_flow_gemini_cli_context_window` | `10` | Number of recent exchanges to inject per turn. |
 
+### Kilo CLI settings (`connector=kilo-cli`)
+
+| Variable | Default | Description |
+|---|---|---|
+| `apple_flow_kilo_cli_command` | `kilo` | Path to the `kilo` binary. |
+| `apple_flow_kilo_cli_model` | `google/gemini-3-flash-preview` | Model flag passed to `kilo`. Empty = Kilo default. |
+| `apple_flow_kilo_cli_context_window` | `10` | Number of recent exchanges to inject per turn. |
+
 ### Cline settings (`connector=cline`)
 
 | Variable | Default | Description |
@@ -73,6 +81,20 @@ Pick one AI backend. The value of `apple_flow_connector` determines which is use
 | `apple_flow_cline_context_window` | `3` | Number of recent exchanges to inject per turn. |
 | `apple_flow_cline_use_json` | `true` | Parse Cline JSON output when available. |
 | `apple_flow_cline_act_mode` | `true` | Enable Cline act mode for faster execution. |
+
+### Ollama settings (`connector=ollama`)
+
+| Variable | Default | Description |
+|---|---|---|
+| `apple_flow_ollama_base_url` | `http://127.0.0.1:11434` | Ollama API base URL. |
+| `apple_flow_ollama_model` | `qwen3.5:4b` | Default local model for Ollama turns. |
+| `apple_flow_ollama_context_window` | `10` | Number of recent exchanges to inject per turn. |
+| `apple_flow_ollama_num_ctx` | `32768` | Requested context length (`options.num_ctx`) for Ollama requests. |
+| `apple_flow_ollama_temperature` | `0.2` | Sampling temperature for Ollama turns. |
+| `apple_flow_ollama_auto_pull_model` | `true` | Auto-pull missing model on first request. |
+| `apple_flow_ollama_tool_timeout_seconds` | `120` | Timeout for each model-triggered shell tool execution. |
+| `apple_flow_ollama_max_tool_iterations` | `8` | Max tool-call loop iterations per turn. |
+| `apple_flow_ollama_max_tool_output_chars` | `12000` | Max stdout/stderr chars returned from tool results. |
 
 ---
 
@@ -112,7 +134,7 @@ Pick one AI backend. The value of `apple_flow_connector` determines which is use
 | `apple_flow_admin_host` | `127.0.0.1` | Host for the admin API server. |
 | `apple_flow_admin_port` | `8787` | Port for the admin API server. |
 
-Access it at `http://localhost:8787` — endpoints: `/sessions`, `/approvals/pending`, `/events`, `POST /task`.
+Access it at `http://localhost:8787` — endpoints: `/health`, `/sessions`, `/runs/{run_id}`, `/approvals/pending`, `/audit/events`, `/metrics`, `POST /task`.
 
 ---
 
@@ -247,13 +269,17 @@ approve <new_request_id> <extra instructions>
 
 ## File Attachments
 
-Allow the AI to read files sent as iMessage attachments.
+Allow the AI to read files sent as iMessage attachments (text/code, PDF, images via OCR when available, and Office files like `.docx/.pptx/.xlsx`).
 
 | Variable | Default | Description |
 |---|---|---|
 | `apple_flow_enable_attachments` | `false` | Enable reading inbound file attachments. |
 | `apple_flow_max_attachment_size_mb` | `10` | Maximum attachment size to process (MB). |
 | `apple_flow_attachment_temp_dir` | `/tmp/apple_flow_attachments` | Temporary directory for attachment processing. |
+| `apple_flow_attachment_max_files_per_message` | `6` | Maximum number of attachments processed per inbound message. |
+| `apple_flow_attachment_max_text_chars_per_file` | `6000` | Per-file extracted text cap before truncation. |
+| `apple_flow_attachment_max_total_text_chars` | `24000` | Total extracted text cap across all attachments in one message. |
+| `apple_flow_attachment_enable_image_ocr` | `true` | Run image OCR when `tesseract` is available. |
 
 ---
 

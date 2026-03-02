@@ -122,6 +122,7 @@ Only `SCAFFOLD.md`, `setup.sh`, and `SOUL.md` are tracked by git. Everything els
 | `orchestrator.py` | Command routing, approval gates, prompt construction, attachment handling |
 | `commanding.py` | Parses command prefixes (idea:, plan:, task:, @alias extraction, CommandKind enum) |
 | `ingress.py` | Reads from macOS Messages chat.db (read-only SQLite, attachment extraction) |
+| `attachments.py` | Local attachment extraction pipeline (text, PDF, OCR, Office formats) for prompt context |
 | `egress.py` | Sends iMessages via AppleScript, deduplicates outbound messages |
 | `policy.py` | Sender allowlist, rate limiting enforcement |
 | `store.py` | Thread-safe SQLite with connection caching and indexes |
@@ -237,7 +238,7 @@ All settings use the `apple_flow_` env prefix. Configured via `.env` file.
 
 ### Connector Settings
 
-- `apple_flow_connector` -- connector to use: `"codex-cli"` (default), `"claude-cli"`, `"gemini-cli"`, `"cline"`, `"kilo-cli"`
+- `apple_flow_connector` -- connector to use: `"codex-cli"` (default), `"claude-cli"`, `"gemini-cli"`, `"cline"`, `"kilo-cli"`, `"ollama"`
 - `apple_flow_codex_turn_timeout_seconds` -- timeout for all connectors (default: 300s/5min)
 
 Connector-specific settings (CLI binary path, model, context window, etc.) are documented in `.env.example`. See also the **Connector selection** section under Development Conventions below.
@@ -245,6 +246,14 @@ Connector-specific settings (CLI binary path, model, context window, etc.) are d
 ### Additional Integrations
 
 Apple Mail, Reminders, Notes, Calendar, Companion, Memory, Follow-Up Scheduler, and Ambient Scanner each have their own config sections. All are disabled by default (opt-in via `.env`).
+
+Attachment extraction controls are configured via:
+- `apple_flow_enable_attachments`
+- `apple_flow_max_attachment_size_mb`
+- `apple_flow_attachment_max_files_per_message`
+- `apple_flow_attachment_max_text_chars_per_file`
+- `apple_flow_attachment_max_total_text_chars`
+- `apple_flow_attachment_enable_image_ocr`
 
 See `.env.example` for the full 60+ field list with descriptions. **When adding a new config field:** update both `config.py` and `.env.example`, add docs to `README.md`, and ensure a sensible default.
 
@@ -366,6 +375,7 @@ tests/test_ambient.py             # AmbientScanner: passive context enrichment, 
   - `claude auth login` -- if using `apple_flow_connector=claude-cli`
   - `gemini auth login` -- if using `apple_flow_connector=gemini-cli`
   - No auth needed for `cline` (uses its own config)
+  - For `ollama`, run a local Ollama server (default `http://127.0.0.1:11434`)
 - For Apple Mail integration: Apple Mail configured and running on this Mac
 - For Apple Reminders integration: Reminders.app on this Mac, a list named per config (default: "Codex Tasks")
 - For Apple Notes integration: Notes.app on this Mac, a folder named per config (default: "Codex Inbox")
@@ -415,6 +425,7 @@ Follow the established pattern: create `<app>_ingress.py` and `<app>_egress.py`,
 - `"claude-cli"`: `claude_cli_connector.py` -- stateless `claude -p`, requires `claude auth login`
 - `"gemini-cli"`: `gemini_cli_connector.py` -- stateless `gemini -p`, requires `gemini auth login`
 - `"cline"`: `cline_connector.py` -- agentic `cline -y`, supports any model provider (OpenAI, Anthropic, Google, DeepSeek, etc.)
+- `"ollama"`: `ollama_connector.py` -- native `/api/chat` integration (local Ollama server)
 - Selection controlled by `apple_flow_connector` config field
 
 ### Key patterns

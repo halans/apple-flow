@@ -10,6 +10,9 @@ This guide gets `apple-flow` running fast on macOS with the safest default path.
   - **Codex** (default): `codex` binary — [developers.openai.com/codex/cli](https://developers.openai.com/codex/cli/)
   - **Claude Code CLI**: `claude` binary — [claude.ai/code](https://claude.ai/code)
   - **Gemini CLI**: `gemini` binary — [github.com/google-gemini/gemini-cli](https://github.com/google-gemini/gemini-cli)
+  - **Cline CLI**: `cline` binary — supports multiple providers
+  - **Kilo CLI**: `kilo` binary
+  - **Ollama**: local Ollama server (`http://127.0.0.1:11434`) with model installed
 
 ## 10-minute quick path
 
@@ -42,7 +45,7 @@ Open `.env` and confirm these at minimum:
 - `apple_flow_allowed_senders=+1YOURNUMBER`
 - `apple_flow_allowed_workspaces=/Users/yourname/code`
 - `apple_flow_default_workspace=/Users/yourname/code/my-project`
-- `apple_flow_connector=codex-cli` (default), `apple_flow_connector=claude-cli`, **or** `apple_flow_connector=gemini-cli`
+- `apple_flow_connector=codex-cli` (default), `apple_flow_connector=claude-cli`, `apple_flow_connector=gemini-cli`, `apple_flow_connector=cline`, `apple_flow_connector=kilo-cli`, or `apple_flow_connector=ollama`
 
 Important: your own phone number must be in `apple_flow_allowed_senders` or relay messages will be blocked.
 
@@ -59,6 +62,12 @@ claude auth login
 
 # If using apple_flow_connector=gemini-cli
 gemini auth login
+
+# If using apple_flow_connector=cline
+# Usually uses its own provider auth (often configured by your Cline setup).
+
+# If using apple_flow_connector=kilo-cli
+# Configure Kilo auth with your usual Kilo auth flow (commonly `kilo auth login`).
 ```
 
 ## 5) Run beginner setup + tests + daemon (3-4 min)
@@ -96,7 +105,7 @@ In the terminal running the daemon, press `Ctrl+C`.
   - Check `apple_flow_messages_db_path` (default should be `/Users/<you>/Library/Messages/chat.db`).
 - No responses to your texts
   - Confirm your sender number exactly matches `apple_flow_allowed_senders`.
-  - Confirm your message uses the prefix `relay:` (default safety setting).
+  - If `apple_flow_require_chat_prefix=true`, confirm your message uses the `relay:` prefix.
 
 ## Optional manual run (without helper script)
 

@@ -37,7 +37,7 @@ class RelaySettings(BaseSettings):
     codex_cli_model: str = ""  # e.g., "gpt-5.3-codex" (empty = use codex default)
 
     # Connector selection.
-    connector: str = ""  # "codex-cli" | "claude-cli" | "gemini-cli" | "kilo-cli" | "cline"
+    connector: str = ""  # "codex-cli" | "claude-cli" | "gemini-cli" | "kilo-cli" | "cline" | "ollama"
 
     # Claude CLI connector settings (used when connector="claude-cli")
     claude_cli_command: str = "claude"
@@ -64,6 +64,17 @@ class RelaySettings(BaseSettings):
     gemini_cli_context_window: int = 10
     gemini_cli_model: str = "gemini-3-flash-preview"
     gemini_cli_approval_mode: str = "yolo"  # default | auto_edit | yolo | plan
+
+    # Ollama connector settings (used when connector="ollama")
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "qwen3.5:4b"
+    ollama_context_window: int = 10
+    ollama_num_ctx: int = 32768
+    ollama_temperature: float = 0.2
+    ollama_auto_pull_model: bool = True
+    ollama_tool_timeout_seconds: float = 120.0
+    ollama_max_tool_iterations: int = 8
+    ollama_max_tool_output_chars: int = 12000
 
     admin_host: str = "127.0.0.1"
     admin_port: int = 8787
@@ -168,6 +179,10 @@ class RelaySettings(BaseSettings):
     enable_attachments: bool = False
     max_attachment_size_mb: int = 10
     attachment_temp_dir: str = "/tmp/apple_flow_attachments"
+    attachment_max_files_per_message: int = 6
+    attachment_max_text_chars_per_file: int = 6000
+    attachment_max_total_text_chars: int = 24000
+    attachment_enable_image_ocr: bool = True
 
     # --- Companion Layer (autonomous proactive assistant) ---
 

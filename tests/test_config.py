@@ -148,6 +148,18 @@ def test_gemini_cli_approval_mode_default(monkeypatch, tmp_path):
     assert settings.gemini_cli_approval_mode == "yolo"
 
 
+def test_ollama_model_default(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    settings = RelaySettings()
+    assert settings.ollama_model == "qwen3.5:4b"
+
+
+def test_ollama_auto_pull_default(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    settings = RelaySettings()
+    assert settings.ollama_auto_pull_model is True
+
+
 def test_timezone_accepts_valid_iana_name(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     settings = RelaySettings(timezone="America/Los_Angeles")

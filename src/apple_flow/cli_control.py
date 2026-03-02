@@ -93,6 +93,8 @@ def _connector_command_key(connector: str) -> str:
         return "apple_flow_gemini_cli_command"
     if connector == "cline":
         return "apple_flow_cline_command"
+    if connector == "ollama":
+        return ""
     return ""
 
 
@@ -155,6 +157,19 @@ def _admin_health(host: str, port: int, token: str) -> bool:
                 return False
             payload = json.loads(response.read().decode("utf-8"))
             return payload.get("status") == "ok"
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return False
+
+
+def _ollama_health(base_url: str) -> bool:
+    url = f"{base_url.rstrip('/')}/api/version"
+    req = urllib.request.Request(url)
+    try:
+        with urllib.request.urlopen(req, timeout=2.0) as response:
+            if response.status != 200:
+                return False
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+            return bool(payload.get("version") or payload)
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
         return False
 
@@ -389,9 +404,16 @@ def _wizard_doctor(args: Any) -> dict[str, Any]:
         }
         connector_command = default_commands.get(connector, "")
 
+    resolved_binary = None
     connector_binary = _connector_binary_from_command(connector_command)
-    resolved_binary = resolve_binary(connector_binary) if connector_binary else None
-    connector_binary_found = bool(resolved_binary)
+    connector_binary_found = False
+    if connector == "ollama":
+        ollama_base_url = env.get("apple_flow_ollama_base_url", "").strip() or "http://127.0.0.1:11434"
+        connector_binary_found = _ollama_health(ollama_base_url)
+        resolved_binary = ollama_base_url if connector_binary_found else ""
+    else:
+        resolved_binary = resolve_binary(connector_binary) if connector_binary else None
+        connector_binary_found = bool(resolved_binary)
 
     token_present = bool(env.get("apple_flow_admin_api_token", "").strip())
 
@@ -407,7 +429,11 @@ def _wizard_doctor(args: Any) -> dict[str, Any]:
     if not readable:
         errors.append(read_reason)
     if not connector_binary_found:
-        errors.append(f"Connector binary not found for {connector}: {connector_binary or '(empty)'}")
+        if connector == "ollama":
+            base_url = env.get("apple_flow_ollama_base_url", "").strip() or "http://127.0.0.1:11434"
+            errors.append(f"Ollama API not reachable at {base_url}")
+        else:
+            errors.append(f"Connector binary not found for {connector}: {connector_binary or '(empty)'}")
     if not token_present:
         if "adminApiTokenPresent" in env:
             errors.append(
@@ -446,9 +472,9 @@ def _wizard_generate_env(args: Any) -> dict[str, Any]:
     connector = (args.connector or "").strip()
     if connector == "codex-app-server":
         connector = "codex-cli"
-    if connector not in {"claude-cli", "codex-cli", "gemini-cli", "cline"}:
+    if connector not in {"claude-cli", "codex-cli", "gemini-cli", "cline", "ollama"}:
         validation_errors.append(
-            "connector must be one of: claude-cli, codex-cli, gemini-cli, cline"
+            "connector must be one of: claude-cli, codex-cli, gemini-cli, cline, ollama"
         )
 
     workspace = validate_workspace_path(args.workspace or "")
@@ -456,7 +482,9 @@ def _wizard_generate_env(args: Any) -> dict[str, Any]:
         validation_errors.append("workspace must be an existing directory")
 
     connector_command = (args.connector_command or "").strip()
-    if not connector_command:
+    if connector == "ollama":
+        connector_command = ""
+    elif not connector_command:
         validation_errors.append("connector-command is required")
     else:
         connector_binary = _connector_binary_from_command(connector_command)

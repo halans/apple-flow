@@ -84,3 +84,18 @@ def test_generate_env_sets_gemini_command_when_gemini_connector_selected():
 
     assert "apple_flow_connector=gemini-cli" in env
     assert "apple_flow_gemini_cli_command=/opt/homebrew/bin/gemini" in env
+
+
+def test_generate_env_sets_ollama_defaults_when_ollama_connector_selected():
+    env = setup_wizard.generate_env(
+        phone="+15551234567",
+        connector="ollama",
+        connector_command="",
+        workspace="/Users/example/code",
+        gateways=[],
+        mail_address="",
+    )
+
+    assert "apple_flow_connector=ollama" in env
+    assert "apple_flow_ollama_base_url=http://127.0.0.1:11434" in env
+    assert "apple_flow_ollama_model=qwen3.5:4b" in env

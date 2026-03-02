@@ -90,16 +90,29 @@ pin_selected_connector_binary() {
       key="apple_flow_cline_command"
       default_cmd="cline"
       ;;
+    ollama)
+      key=""
+      default_cmd=""
+      ;;
     codex-app-server)
       key="apple_flow_codex_app_server_cmd"
       default_cmd="codex app-server"
       ;;
     *)
       echo "❌ Unsupported connector in .env: $connector"
-      echo "Set apple_flow_connector to one of: codex-cli, claude-cli, gemini-cli, cline, codex-app-server"
+      echo "Set apple_flow_connector to one of: codex-cli, claude-cli, gemini-cli, cline, ollama, codex-app-server"
       exit 1
       ;;
   esac
+
+  if [[ "$connector" == "ollama" ]]; then
+    SELECTED_CONNECTOR="$connector"
+    SELECTED_CONNECTOR_COMMAND=""
+    SELECTED_CONNECTOR_KEY="apple_flow_ollama_base_url"
+    export SELECTED_CONNECTOR SELECTED_CONNECTOR_COMMAND SELECTED_CONNECTOR_KEY
+    echo "✓ Using native Ollama API connector"
+    return 0
+  fi
 
   current_cmd="$(env_get "$key")"
   if [[ -z "${current_cmd//[[:space:]]/}" ]]; then
@@ -121,6 +134,7 @@ pin_selected_connector_binary() {
     echo "  - claude-cli: curl -fsSL https://claude.ai/install.sh | bash && claude auth login"
     echo "  - gemini-cli: npm install -g @google/gemini-cli && gemini auth login"
     echo "  - cline: npm install -g cline && cline auth"
+    echo "  - ollama: install Ollama app/daemon and run `ollama serve`"
     exit 1
   fi
 
@@ -197,9 +211,35 @@ except OSError as exc:
 PY
 
   if [[ "$SELECTED_CONNECTOR" != "codex-app-server" ]]; then
-    if [[ ! -x "$SELECTED_CONNECTOR_COMMAND" ]]; then
-      echo "❌ Selected connector command is not executable: $SELECTED_CONNECTOR_COMMAND"
-      exit 1
+    if [[ "$SELECTED_CONNECTOR" == "ollama" ]]; then
+      local ollama_base_url
+      ollama_base_url="$(env_get apple_flow_ollama_base_url)"
+      if [[ -z "${ollama_base_url//[[:space:]]/}" ]]; then
+        ollama_base_url="http://127.0.0.1:11434"
+      fi
+
+      OLLAMA_BASE_URL="$ollama_base_url" "$VENV_PYTHON" - <<'PY'
+import json
+import os
+import urllib.error
+import urllib.request
+
+url = os.environ["OLLAMA_BASE_URL"].rstrip("/") + "/api/version"
+try:
+    with urllib.request.urlopen(url, timeout=2.0) as response:
+        if response.status != 200:
+            raise SystemExit(f"❌ Ollama API returned HTTP {response.status} at {url}")
+        payload = json.loads((response.read() or b"{}").decode("utf-8"))
+        if not payload:
+            raise SystemExit(f"❌ Ollama API at {url} returned an empty payload")
+except urllib.error.URLError as exc:
+    raise SystemExit(f"❌ Ollama API unreachable at {url}: {exc}")
+PY
+    else
+      if [[ ! -x "$SELECTED_CONNECTOR_COMMAND" ]]; then
+        echo "❌ Selected connector command is not executable: $SELECTED_CONNECTOR_COMMAND"
+        exit 1
+      fi
     fi
   fi
 

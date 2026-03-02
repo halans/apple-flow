@@ -219,6 +219,19 @@ apple_flow_memory_v2_shadow_mode=true
 apple_flow_memory_v2_migrate_on_start=true
 ```
 
+Attachment processing example:
+
+```env
+apple_flow_enable_attachments=true
+apple_flow_max_attachment_size_mb=10
+apple_flow_attachment_max_files_per_message=6
+apple_flow_attachment_max_text_chars_per_file=6000
+apple_flow_attachment_max_total_text_chars=24000
+apple_flow_attachment_enable_image_ocr=true
+```
+
+When enabled, Apple Flow extracts prompt context from iMessage attachments (text/code files, PDFs, images via OCR when available, and Office files like `.docx/.pptx/.xlsx`) and includes that context in chat, planning, and approval execution flows.
+
 See full settings in [docs/ENV_SETUP.md](docs/ENV_SETUP.md).
 
 ## AI Backends
@@ -230,12 +243,14 @@ See full settings in [docs/ENV_SETUP.md](docs/ENV_SETUP.md).
 | Gemini CLI | `apple_flow_connector=gemini-cli` |
 | Cline CLI | `apple_flow_connector=cline` |
 | Kilo CLI | `apple_flow_connector=kilo-cli` |
+| Ollama (native) | `apple_flow_connector=ollama` |
 
 Notes:
 
 - `codex-cli`, `claude-cli`, and `gemini-cli` run stateless commands.
 - `cline` is agentic and supports multiple providers.
-- `kilo-cli` is supported as a connector, but setup wizard `generate-env` currently validates only `claude-cli`, `codex-cli`, `gemini-cli`, and `cline`. For `kilo-cli`, set connector fields via manual config write after generation.
+- `kilo-cli` is supported as a connector, but setup wizard `generate-env` currently validates `claude-cli`, `codex-cli`, `gemini-cli`, `cline`, and `ollama`. For `kilo-cli`, set connector fields via manual config write after generation.
+- `ollama` uses a native HTTP connector (`/api/chat`) with default model `qwen3.5:4b`.
 
 ## Agent Teams
 

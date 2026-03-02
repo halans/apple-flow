@@ -40,6 +40,8 @@ Works via **iMessage** (default), **Apple Mail**, **Apple Reminders**, **Apple N
   - **Claude Code CLI** -- `claude` binary from [claude.ai/code](https://claude.ai/code)
   - **Gemini CLI** -- `gemini` binary from [github.com/google-gemini/gemini-cli](https://github.com/google-gemini/gemini-cli)
   - **Cline CLI** -- `cline` binary, supports any model provider (OpenAI, Anthropic, Google, DeepSeek, etc.)
+  - **Kilo CLI** -- `kilo` binary
+  - **Ollama** -- local Ollama server (`http://127.0.0.1:11434` by default)
 
 ---
 
@@ -95,7 +97,10 @@ No separate auth needed -- Cline uses its own configuration.
 gemini auth login
 ```
 
-Follow the prompts in your browser (Options A/B/D). This only needs to be done once per machine.
+**Option E -- Kilo CLI** (uses `kilo run --auto`):
+No separate setup step here; configure with your normal Kilo auth flow (often `kilo auth login`) if required by your provider.
+
+Follow the prompts in your browser (Options A/B/C/D/E). This only needs to be done once per machine.
 
 Then set your connector in `.env` (Step 6, if you choose manual editing):
 ```bash
@@ -103,6 +108,8 @@ apple_flow_connector=codex-cli   # for Codex (default)
 apple_flow_connector=claude-cli  # for Claude Code
 apple_flow_connector=gemini-cli  # for Gemini CLI
 apple_flow_connector=cline       # for Cline
+apple_flow_connector=kilo-cli    # for Kilo
+apple_flow_connector=ollama      # for native local Ollama
 ```
 
 ## Step 4: Run the Setup Script (Skip if using Dashboard App)
@@ -181,13 +188,14 @@ apple_flow_connector=codex-cli   # default -- requires: codex login
 apple_flow_connector=claude-cli  # alternative -- requires: claude auth login
 apple_flow_connector=gemini-cli  # alternative -- requires: gemini auth login
 apple_flow_connector=cline       # alternative -- uses its own config
+apple_flow_connector=ollama      # alternative -- requires local Ollama API
 ```
 
 **Kilo CLI** — Kilo AI coding assistant:
 ```bash
 apple_flow_connector=kilo-cli
 ```
-No separate auth needed — Kilo uses its own configuration.
+Configure auth according to your local Kilo setup (often `kilo auth login`).
 
 **Phone Number Format:**
 - Correct: `+15551234567` (with country code)
@@ -343,7 +351,7 @@ nano .env
 # Set: apple_flow_allowed_senders=+15551234567
 ```
 
-### "codex not found" / "claude not found" / "gemini not found" / "cline not found"
+### "codex not found" / "claude not found" / "gemini not found" / "cline not found" / "ollama unreachable"
 
 **Cause**: The CLI for your chosen connector isn't installed or not on `$PATH`.
 
@@ -352,6 +360,7 @@ nano .env
 - For Claude: install the `claude` CLI from [claude.ai/code](https://claude.ai/code), then run `claude auth login`
 - For Gemini: install the `gemini` CLI from [github.com/google-gemini/gemini-cli](https://github.com/google-gemini/gemini-cli), then run `gemini auth login`
 - For Cline: install the `cline` CLI and configure it
+- For Ollama: start local Ollama (`ollama serve`) and verify `apple_flow_ollama_base_url` (default `http://127.0.0.1:11434`)
 - Make sure `apple_flow_connector` in `.env` matches what you installed
 
 ### No Response from iMessage
@@ -393,7 +402,9 @@ python -m apple_flow admin
 Visit `http://localhost:8787` for:
 - `/sessions` - Active conversations
 - `/approvals/pending` - Pending approvals
-- `/events` - Audit log
+- `/runs/{run_id}` - Per-run details
+- `/audit/events` - Audit log
+- `/metrics` - Simple metrics
 - `POST /task` - Submit tasks programmatically (Siri Shortcuts / curl)
 
 ### Run as Background Service
@@ -527,7 +538,7 @@ POST /task -> FastAPI ---------------+
 - **Ingress modules**: Read from macOS app databases/AppleScript
 - **Policy**: Enforces sender allowlist and rate limits
 - **Orchestrator**: Routes commands and manages approvals
-- **Connector**: Stateless CLI per turn -- `codex exec`, `claude -p`, `gemini -p`, or `cline -y`
+- **Connector**: Stateless CLI per turn (`codex exec`, `claude -p`, `gemini -p`, `cline -y`) or native local Ollama (`/api/chat`)
 - **Store**: Persists sessions, runs, approvals, and scheduled actions
 - **Egress modules**: Send replies via AppleScript to each Apple app
 - **CompanionLoop**: Proactive observations, daily digests, weekly reviews

@@ -23,6 +23,7 @@ from .utils import normalize_sender
 logger = logging.getLogger("apple_flow.orchestrator")
 
 if TYPE_CHECKING:
+    from .attachments import AttachmentProcessor
     from .memory import FileMemory
     from .memory_v2 import MemoryService
     from .office_sync import OfficeSyncer
@@ -54,6 +55,7 @@ class RelayOrchestrator:
         max_resume_attempts: int = 5,
         enable_verifier: bool = False,
         enable_attachments: bool = False,
+        attachment_processor: AttachmentProcessor | None = None,
         personality_prompt: str = "",
         reminders_egress: Any = None,
         reminders_archive_list_name: str = "agent-archive",
@@ -84,6 +86,7 @@ class RelayOrchestrator:
         self.workspace_aliases = workspace_aliases or {}
         self.auto_context_messages = auto_context_messages
         self.enable_attachments = enable_attachments
+        self.attachment_processor = attachment_processor
         self.personality_prompt = personality_prompt
         self.shutdown_callback = shutdown_callback
         self.log_notes_egress = log_notes_egress
@@ -157,6 +160,7 @@ class RelayOrchestrator:
         raw_text = message.text.strip()
         if not raw_text:
             return OrchestrationResult(kind=CommandKind.CHAT, response="ignored_empty")
+        self._prepare_attachment_context(message)
 
         command = parse_command(raw_text)
         if command.kind is CommandKind.CHAT and self.require_chat_prefix:
@@ -260,7 +264,12 @@ class RelayOrchestrator:
         prompt = self._inject_attachment_context(message, prompt)
         prompt = self._inject_memory_context(prompt)
 
-        response = self._run_connector_turn(thread_id, prompt, team_context)
+        response = self._run_connector_turn(
+            thread_id,
+            prompt,
+            team_context=team_context,
+            allow_tools=False,
+        )
         self._send(message.sender, response, context=message.context)
         self._log_to_notes(command.kind.value, message.sender, command.payload, response)
         return OrchestrationResult(kind=command.kind, response=response)
@@ -669,6 +678,8 @@ class RelayOrchestrator:
             return "Gemini"
         if "claude" in name:
             return "Claude"
+        if "ollama" in name:
+            return "Ollama"
         if "cline" in name:
             return "Cline"
         if "codex" in name:
@@ -677,7 +688,7 @@ class RelayOrchestrator:
 
     def _provider_command_patterns(self) -> list[str]:
         patterns: list[str] = []
-        for attr in ("gemini_command", "claude_command", "codex_command", "cline_command"):
+        for attr in ("gemini_command", "claude_command", "codex_command", "cline_command", "ollama_command"):
             raw = getattr(self.connector, attr, "")
             if not isinstance(raw, str):
                 continue
@@ -1195,9 +1206,24 @@ class RelayOrchestrator:
 
     # --- Attachment Context ---
 
+    def _prepare_attachment_context(self, message: InboundMessage) -> None:
+        if not self.enable_attachments or self.attachment_processor is None:
+            return
+        attachments = message.context.get("attachments", [])
+        if not attachments:
+            return
+        block, metadata = self.attachment_processor.build_prompt_block(message.id, attachments)
+        if block:
+            message.context["attachment_prompt_block"] = block
+        if metadata:
+            message.context["attachment_processing"] = metadata
+
     def _inject_attachment_context(self, message: InboundMessage, prompt: str) -> str:
         if not self.enable_attachments:
             return prompt
+        block = str(message.context.get("attachment_prompt_block") or "").strip()
+        if block:
+            return f"{prompt}\n\n{block}"
         attachments = message.context.get("attachments", [])
         if not attachments:
             return prompt
@@ -1227,10 +1253,22 @@ class RelayOrchestrator:
             return f"planning mode: create a stepwise implementation plan with acceptance criteria. goal={payload}"
         return self._build_unified_prompt(payload, workspace)
 
-    def _run_connector_turn(self, thread_id: str, prompt: str, team_context: dict[str, Any] | None = None) -> str:
+    def _run_connector_turn(
+        self,
+        thread_id: str,
+        prompt: str,
+        team_context: dict[str, Any] | None = None,
+        *,
+        allow_tools: bool = False,
+        cwd: str | None = None,
+    ) -> str:
         options: dict[str, Any] = {}
         if team_context and team_context.get("codex_config_path"):
             options["codex_config_path"] = team_context["codex_config_path"]
+        if allow_tools:
+            options["allow_tools"] = True
+        if cwd and allow_tools:
+            options["cwd"] = cwd
 
         if options:
             try:

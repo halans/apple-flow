@@ -4,6 +4,7 @@ from typing import Any
 
 from conftest import FakeConnector, FakeEgress, FakeStore
 
+from apple_flow.attachments import AttachmentProcessor
 from apple_flow.commanding import CommandKind
 from apple_flow.models import InboundMessage
 from apple_flow.orchestrator import RelayOrchestrator
@@ -668,6 +669,62 @@ def test_mail_channel_explicit_task_still_requires_approval():
     result = orch.handle_message(msg)
     assert result.kind is CommandKind.TASK
     assert result.approval_request_id is not None
+
+
+def test_task_approval_flow_includes_attachment_block_in_planner_and_executor(tmp_path):
+    attachment = tmp_path / "notes.txt"
+    attachment.write_text("deploy checklist: 1) backup 2) migrate", encoding="utf-8")
+
+    connector = FakeConnector()
+    egress = FakeEgress()
+    store = FakeStore()
+    orchestrator = RelayOrchestrator(
+        connector=connector,
+        egress=egress,
+        store=store,
+        allowed_workspaces=["/Users/cypher/Public/code/codex-flow"],
+        default_workspace="/Users/cypher/Public/code/codex-flow",
+        enable_attachments=True,
+        attachment_processor=AttachmentProcessor(),
+    )
+
+    msg = InboundMessage(
+        id="att_task_1",
+        sender="+15551234567",
+        text="task: deploy service",
+        received_at="2026-03-02T12:00:00Z",
+        is_from_me=False,
+        context={
+            "attachments": [
+                {
+                    "filename": "notes.txt",
+                    "mime_type": "text/plain",
+                    "path": str(attachment),
+                    "size_bytes": "64",
+                }
+            ]
+        },
+    )
+    result = orchestrator.handle_message(msg)
+    assert result.approval_request_id is not None
+    assert "Attached files (processed):" in connector.turns[0][1]
+    assert "deploy checklist" in connector.turns[0][1]
+
+    source_context = store.get_run_source_context(result.run_id)
+    assert source_context is not None
+    assert "attachment_prompt_block" in source_context
+    assert "notes.txt" in source_context["attachment_prompt_block"]
+
+    approve_msg = InboundMessage(
+        id="att_task_2",
+        sender="+15551234567",
+        text=f"approve {result.approval_request_id}",
+        received_at="2026-03-02T12:01:00Z",
+        is_from_me=False,
+    )
+    orchestrator.handle_message(approve_msg)
+    assert "Attached files (processed):" in connector.turns[1][1]
+    assert "deploy checklist" in connector.turns[1][1]
     assert any("Here's my plan" in text for _, text in egress.messages)
 
 

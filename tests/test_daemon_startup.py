@@ -187,6 +187,80 @@ def test_relaydaemon_wires_gemini_approval_mode(monkeypatch, tmp_path):
     assert daemon.connector is not None
 
 
+def test_relaydaemon_wires_ollama_connector(monkeypatch, tmp_path):
+    captured_kwargs: dict[str, object] = {}
+
+    class _FakeStore:
+        def __init__(self, _path):
+            self._conn = sqlite3.connect(":memory:")
+            self._lock = threading.Lock()
+
+        def bootstrap(self):
+            pass
+
+        def get_state(self, _key):
+            return None
+
+        def set_state(self, _key, _value):
+            pass
+
+        def _connect(self):
+            return self._conn
+
+    class _FakeIngress:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def latest_rowid(self):
+            return None
+
+    class _FakeOrchestrator:
+        def __init__(self, *_args, **_kwargs):
+            self._approval = object()
+
+        def set_run_executor(self, _executor):
+            pass
+
+    class _FakeRunExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+    class _FakeOllamaConnector:
+        def __init__(self, **kwargs):
+            captured_kwargs.update(kwargs)
+
+        def shutdown(self):
+            pass
+
+        def cancel_active_processes(self, _thread_id=None):
+            return 0
+
+    monkeypatch.setattr(daemon_module, "ensure_gateway_resources", lambda **_kwargs: [])
+    monkeypatch.setattr(daemon_module, "SQLiteStore", _FakeStore)
+    monkeypatch.setattr(daemon_module, "PolicyEngine", lambda _settings: object())
+    monkeypatch.setattr(daemon_module, "IMessageIngress", _FakeIngress)
+    monkeypatch.setattr(daemon_module, "IMessageEgress", lambda **_kwargs: object())
+    monkeypatch.setattr(daemon_module, "RelayOrchestrator", _FakeOrchestrator)
+    monkeypatch.setattr(daemon_module, "RunExecutor", _FakeRunExecutor)
+    monkeypatch.setattr(daemon_module, "OllamaConnector", _FakeOllamaConnector)
+
+    settings = RelaySettings(
+        connector="ollama",
+        db_path=tmp_path / "relay.db",
+        default_workspace=str(tmp_path),
+        allowed_workspaces=[str(tmp_path)],
+        soul_file=str(tmp_path / "missing_soul.md"),
+        ollama_model="qwen3.5:4b",
+        ollama_auto_pull_model=True,
+    )
+
+    daemon = RelayDaemon(settings)
+    assert captured_kwargs["model"] == "qwen3.5:4b"
+    assert captured_kwargs["base_url"] == settings.ollama_base_url
+    assert captured_kwargs["auto_pull_model"] is True
+    assert daemon.connector is not None
+
+
 def test_relaydaemon_initializes_memory_v2(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
 

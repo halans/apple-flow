@@ -42,6 +42,7 @@ _ENUM_OPTIONS: dict[str, list[str]] = {
         "gemini-cli",
         "kilo-cli",
         "cline",
+        "ollama",
     ],
     "apple_flow_gemini_cli_approval_mode": ["default", "auto_edit", "yolo", "plan"],
     "apple_flow_companion_weekly_review_day": [
@@ -94,6 +95,7 @@ def _section_for_key(key: str) -> str:
             "apple_flow_gemini_",
             "apple_flow_kilo_",
             "apple_flow_cline_",
+            "apple_flow_ollama_",
         )
     ):
         return "connectors"
@@ -132,7 +134,7 @@ def _section_for_key(key: str) -> str:
     if key.startswith("apple_flow_calendar_") or key == "apple_flow_enable_calendar_polling":
         return "calendar"
     if key.startswith("apple_flow_enable_attachments") or key.startswith("apple_flow_max_attachment") or key.startswith(
-        "apple_flow_attachment_temp_dir"
+        "apple_flow_attachment_"
     ):
         return "attachments"
     if key.startswith("apple_flow_enable_progress") or key.startswith("apple_flow_progress_") or key.startswith(

@@ -1,0 +1,138 @@
+from __future__ import annotations
+
+import zipfile
+
+from apple_flow.attachments import AttachmentProcessor
+
+
+def test_extracts_text_file(tmp_path):
+    text_file = tmp_path / "note.txt"
+    text_file.write_text("hello from attachment", encoding="utf-8")
+    processor = AttachmentProcessor()
+
+    block, metadata = processor.build_prompt_block(
+        "m1",
+        [
+            {
+                "filename": "note.txt",
+                "mime_type": "text/plain",
+                "path": str(text_file),
+            }
+        ],
+    )
+
+    assert "Attached files (processed):" in block
+    assert "status=ok" in block
+    assert "hello from attachment" in block
+    assert metadata[0]["status"] == "ok"
+
+
+def test_pdf_reports_extractor_unavailable_without_pdftotext(tmp_path, monkeypatch):
+    pdf_file = tmp_path / "doc.pdf"
+    pdf_file.write_bytes(b"%PDF-1.4 test")
+    monkeypatch.setattr("apple_flow.attachments.shutil.which", lambda _name: None)
+    processor = AttachmentProcessor()
+
+    block, metadata = processor.build_prompt_block(
+        "m2",
+        [{"filename": "doc.pdf", "mime_type": "application/pdf", "path": str(pdf_file)}],
+    )
+
+    assert "status=pdf_extractor_unavailable" in block
+    assert metadata[0]["status"] == "pdf_extractor_unavailable"
+
+
+def test_image_reports_ocr_unavailable_without_tesseract(tmp_path, monkeypatch):
+    image_file = tmp_path / "image.png"
+    image_file.write_bytes(b"not-a-real-png")
+
+    def _which(name: str):
+        return None if name == "tesseract" else "/usr/bin/false"
+
+    monkeypatch.setattr("apple_flow.attachments.shutil.which", _which)
+    processor = AttachmentProcessor(enable_image_ocr=True)
+
+    block, metadata = processor.build_prompt_block(
+        "m3",
+        [{"filename": "image.png", "mime_type": "image/png", "path": str(image_file)}],
+    )
+
+    assert "status=ocr_unavailable" in block
+    assert metadata[0]["status"] == "ocr_unavailable"
+
+
+def test_missing_file_is_marked():
+    processor = AttachmentProcessor()
+    block, metadata = processor.build_prompt_block(
+        "m4",
+        [{"filename": "missing.txt", "mime_type": "text/plain", "path": "/tmp/does-not-exist"}],
+    )
+    assert "status=missing_file" in block
+    assert metadata[0]["status"] == "missing_file"
+
+
+def test_truncation_limits_are_enforced(tmp_path):
+    huge = tmp_path / "huge.txt"
+    huge.write_text("x" * 500, encoding="utf-8")
+    processor = AttachmentProcessor(
+        max_text_chars_per_file=100,
+        max_total_text_chars=80,
+    )
+    block, metadata = processor.build_prompt_block(
+        "m5",
+        [{"filename": "huge.txt", "mime_type": "text/plain", "path": str(huge)}],
+    )
+    assert "status=truncated" in block
+    assert "Attachment text truncated due to max-total-text limit." in block
+    assert metadata[0]["status"] == "truncated"
+
+
+def test_docx_pptx_xlsx_extract_text(tmp_path):
+    docx = tmp_path / "doc.docx"
+    with zipfile.ZipFile(docx, "w") as zf:
+        zf.writestr(
+            "word/document.xml",
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            "<w:body><w:p><w:r><w:t>Hello DOCX</w:t></w:r></w:p></w:body></w:document>",
+        )
+
+    pptx = tmp_path / "slides.pptx"
+    with zipfile.ZipFile(pptx, "w") as zf:
+        zf.writestr(
+            "ppt/slides/slide1.xml",
+            '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+            'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
+            "<p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Hello PPTX</a:t></a:r></a:p>"
+            "</p:txBody></p:sp></p:spTree></p:cSld></p:sld>",
+        )
+
+    xlsx = tmp_path / "sheet.xlsx"
+    with zipfile.ZipFile(xlsx, "w") as zf:
+        zf.writestr(
+            "xl/sharedStrings.xml",
+            '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            "<si><t>Hello XLSX</t></si></sst>",
+        )
+        zf.writestr(
+            "xl/worksheets/sheet1.xml",
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>',
+        )
+
+    processor = AttachmentProcessor()
+    block, metadata = processor.build_prompt_block(
+        "m6",
+        [
+            {"filename": docx.name, "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "path": str(docx)},
+            {"filename": pptx.name, "mime_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation", "path": str(pptx)},
+            {"filename": xlsx.name, "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "path": str(xlsx)},
+        ],
+    )
+
+    statuses = {item["filename"]: item["status"] for item in metadata}
+    assert statuses["doc.docx"] == "ok"
+    assert statuses["slides.pptx"] == "ok"
+    assert statuses["sheet.xlsx"] == "ok"
+    assert "Hello DOCX" in block
+    assert "Hello PPTX" in block
+    assert "Hello XLSX" in block

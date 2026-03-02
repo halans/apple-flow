@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-03-02
+
+### Added
+- **Native Ollama connector**: Added `ollama_connector.py` with direct `/api/chat` integration, optional auto-pull for missing models, and managed tool subprocess cancellation.
+- **Qwen local-model support docs/config**: Added Ollama configuration surface in `config.py`, `.env.example`, setup scripts, setup wizard, and docs for local `qwen3.5:2b` / `qwen3.5:4b` usage.
+- **Attachment processing pipeline**: Added `attachments.py` with prompt-safe extraction for text, PDF, image OCR (optional), and Office formats (`.docx/.pptx/.xlsx`) plus truncation and size/file-count safety limits.
+- **Attachment and Ollama tests**: Added `tests/test_attachment_processor.py` and `tests/test_ollama_connector.py`, plus integration coverage updates across orchestrator/daemon/setup flows.
+- **Local Ollama benchmark helper**: Added `scripts/ollama_bench.py` for quick local capability checks.
+
+### Changed
+- **Connector routing and startup**: Daemon/config schema now support `connector=ollama` end-to-end, including startup status and doctor/setup flows.
+- **Approval tool gating**: Approval execution paths now pass explicit tool-allow flags so planning/verification stay non-tooling while approved execution can use tools.
+- **Attachment limit behavior**: Attachment text limits now honor configured values directly instead of forcing large minimum clamps.
+
 ## [0.3.1] - 2026-02-28
 
 ### Added
@@ -160,6 +174,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| 0.4.0 | 2026-03-02 | Native Ollama connector, local Qwen support, and inbound attachment processing with safety limits/tests |
 | 0.3.1 | 2026-02-28 | Canonical memory v2 rollout (feature-flagged), shadow mode, maintenance, and docs/tests updates |
 | 0.3.0 | 2026-02-26 | Codex agent teams, Kilo connector, reliability/ops improvements |
 | 0.2.1 | 2026-02-20 | Cross-gateway approval fix, CI, branding cleanup |
@@ -168,7 +183,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/dkyazzentwatwa/apple-flow/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/dkyazzentwatwa/apple-flow/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/dkyazzentwatwa/apple-flow/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/dkyazzentwatwa/apple-flow/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/dkyazzentwatwa/apple-flow/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/dkyazzentwatwa/apple-flow/compare/v0.2.0...v0.2.1

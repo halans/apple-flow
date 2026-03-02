@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .ambient import AmbientScanner
+from .attachments import AttachmentProcessor
 from .calendar_egress import AppleCalendarEgress
 from .calendar_ingress import AppleCalendarIngress
 from .claude_cli_connector import ClaudeCliConnector
@@ -32,6 +33,7 @@ from .memory_v2 import MemoryService
 from .notes_egress import AppleNotesEgress
 from .notes_ingress import AppleNotesIngress
 from .office_sync import OfficeSyncer
+from .ollama_connector import OllamaConnector
 from .orchestrator import RelayOrchestrator
 from .policy import PolicyEngine
 from .protocols import ConnectorProtocol
@@ -126,6 +128,13 @@ class RelayDaemon:
         self.egress = IMessageEgress(
             suppress_duplicate_outbound_seconds=settings.suppress_duplicate_outbound_seconds
         )
+        self.attachment_processor = AttachmentProcessor(
+            max_attachment_size_mb=settings.max_attachment_size_mb,
+            max_files_per_message=settings.attachment_max_files_per_message,
+            max_text_chars_per_file=settings.attachment_max_text_chars_per_file,
+            max_total_text_chars=settings.attachment_max_total_text_chars,
+            enable_image_ocr=settings.attachment_enable_image_ocr,
+        )
 
         # Choose connector based on configuration
         for warning in settings.get_connector_warnings():
@@ -137,6 +146,7 @@ class RelayDaemon:
             "gemini-cli",
             "kilo-cli",
             "cline",
+            "ollama",
         }
         if connector_type not in known_connectors:
             raise ValueError(
@@ -197,6 +207,26 @@ class RelayDaemon:
                 system_prompt=settings.personality_prompt.replace(
                     "{workspace}", settings.default_workspace
                 ),
+            )
+        elif connector_type == "ollama":
+            logger.info("Using native Ollama connector (/api/chat) for local execution")
+            self.connector = OllamaConnector(
+                base_url=settings.ollama_base_url,
+                model=settings.ollama_model,
+                workspace=settings.default_workspace,
+                timeout=settings.codex_turn_timeout_seconds,
+                context_window=settings.ollama_context_window,
+                inject_tools_context=settings.inject_tools_context,
+                system_prompt=settings.personality_prompt.replace(
+                    "{workspace}", settings.default_workspace
+                ),
+                num_ctx=settings.ollama_num_ctx,
+                temperature=settings.ollama_temperature,
+                auto_pull_model=settings.ollama_auto_pull_model,
+                tool_timeout_seconds=settings.ollama_tool_timeout_seconds,
+                max_tool_iterations=settings.ollama_max_tool_iterations,
+                max_tool_output_chars=settings.ollama_max_tool_output_chars,
+                allowed_workspaces=settings.allowed_workspaces,
             )
         else:  # codex-cli (default)
             logger.info("Using CLI connector (codex exec) for stateless execution")
@@ -356,6 +386,7 @@ class RelayDaemon:
             max_resume_attempts=settings.max_resume_attempts,
             enable_verifier=settings.enable_verifier,
             enable_attachments=settings.enable_attachments,
+            attachment_processor=self.attachment_processor,
             personality_prompt=settings.personality_prompt,
             shutdown_callback=self.request_shutdown,
             log_notes_egress=notes_log_egress_obj,
@@ -1199,6 +1230,9 @@ class RelayDaemon:
         elif connector_type == "gemini-cli":
             model_val = self.settings.gemini_cli_model or "gemini default"
             connector_line = "⚙️  Engine: gemini -p (stateless)"
+        elif connector_type == "ollama":
+            model_val = self.settings.ollama_model or "ollama default"
+            connector_line = "⚙️  Engine: ollama /api/chat (native, local)"
         elif connector_type == "cline":
             model_val = self.settings.cline_model or "cline default"
             connector_line = "⚙️  Engine: cline -y (agentic)"

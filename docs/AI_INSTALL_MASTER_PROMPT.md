@@ -43,7 +43,7 @@ Collect all desired config values:
   - apple_flow_allowed_senders (E.164, e.g. +15551234567)
   - apple_flow_allowed_workspaces
   - apple_flow_default_workspace
-  - apple_flow_connector (claude-cli | codex-cli | gemini-cli | cline | kilo-cli)
+  - apple_flow_connector (claude-cli | codex-cli | gemini-cli | cline | ollama | kilo-cli)
   - connector command path (binary/command)
   - apple_flow_timezone (if non-default)
 - Safety/policy:
@@ -94,7 +94,7 @@ Phase C - Generate Full .env Preview
 4) Ask for confirmation before any write.
 
 Important connector caveat:
-- `wizard generate-env` currently validates only: `claude-cli`, `codex-cli`, `gemini-cli`, `cline`.
+- `wizard generate-env` currently validates: `claude-cli`, `codex-cli`, `gemini-cli`, `cline`, `ollama`.
 - If user selected `kilo-cli`, generate with a supported connector first, then patch connector keys in Phase D via `config write`.
 
 Phase D - Apply + Validate

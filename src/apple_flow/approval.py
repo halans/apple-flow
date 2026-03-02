@@ -304,6 +304,11 @@ class ApprovalHandler:
             exec_prompt_parts.append(f"approved plan:\n{plan_summary}")
         if extra_instructions:
             exec_prompt_parts.append(f"additional instructions from user: {extra_instructions}")
+        attachment_prompt_block = ""
+        if isinstance(source_context, dict):
+            attachment_prompt_block = str(source_context.get("attachment_prompt_block") or "").strip()
+        if attachment_prompt_block:
+            exec_prompt_parts.append(attachment_prompt_block)
         exec_prompt = "\n".join(exec_prompt_parts)
         exec_prompt = self._apply_team_prompt_fallback(exec_prompt, team_context)
 
@@ -316,6 +321,8 @@ class ApprovalHandler:
             phase=f"execution attempt {attempt}",
             team_context=team_context,
             egress_context=egress_context,
+            allow_tools=True,
+            cwd=str(run.get("cwd", "")),
         )
 
         outcome, reason = self._classify_execution_outcome(execution_output)
@@ -366,6 +373,7 @@ class ApprovalHandler:
                 phase=f"verification attempt {attempt}",
                 team_context=team_context,
                 egress_context=egress_context,
+                allow_tools=False,
             )
             verifier_outcome, verifier_reason = self._classify_execution_outcome(verification_output)
             self._create_event(
@@ -466,6 +474,11 @@ class ApprovalHandler:
             if source_context is None:
                 source_context = {}
             source_context["team_context"] = team_context
+        attachment_prompt_block = str(message.context.get("attachment_prompt_block") or "").strip()
+        if attachment_prompt_block:
+            if source_context is None:
+                source_context = {}
+            source_context["attachment_prompt_block"] = attachment_prompt_block
 
         self.store.create_run(
             run_id=run_id,
@@ -487,10 +500,13 @@ class ApprovalHandler:
             "planner mode: produce an objective, steps, risks, and done criteria. "
             f"intent={kind.value}; request={payload}; workspace={ws}"
         )
+        if attachment_prompt_block:
+            planner_prompt = f"{planner_prompt}\n\n{attachment_prompt_block}"
         plan_output = self._run_connector_turn(
             thread_id=thread_id,
             prompt=self._apply_team_prompt_fallback(planner_prompt, team_context),
             team_context=team_context,
+            allow_tools=False,
         )
 
         self.store.update_run_state(run_id, RunState.AWAITING_APPROVAL.value)
@@ -527,10 +543,17 @@ class ApprovalHandler:
         thread_id: str,
         prompt: str,
         team_context: dict[str, Any] | None = None,
+        *,
+        allow_tools: bool = False,
+        cwd: str | None = None,
     ) -> str:
         options: dict[str, Any] = {}
         if team_context and team_context.get("codex_config_path"):
             options["codex_config_path"] = team_context["codex_config_path"]
+        if allow_tools:
+            options["allow_tools"] = True
+        if cwd and allow_tools:
+            options["cwd"] = cwd
         if options:
             try:
                 return self.connector.run_turn(thread_id, prompt, options=options)  # type: ignore[arg-type]
@@ -544,10 +567,17 @@ class ApprovalHandler:
         prompt: str,
         on_progress: Any,
         team_context: dict[str, Any] | None = None,
+        *,
+        allow_tools: bool = False,
+        cwd: str | None = None,
     ) -> str:
         options: dict[str, Any] = {}
         if team_context and team_context.get("codex_config_path"):
             options["codex_config_path"] = team_context["codex_config_path"]
+        if allow_tools:
+            options["allow_tools"] = True
+        if cwd and allow_tools:
+            options["cwd"] = cwd
         if options:
             try:
                 return self.connector.run_turn_streaming(
@@ -578,6 +608,9 @@ class ApprovalHandler:
         phase: str,
         team_context: dict[str, Any] | None = None,
         egress_context: dict[str, Any] | None = None,
+        *,
+        allow_tools: bool = False,
+        cwd: str | None = None,
     ) -> str:
         if self.enable_progress_streaming and hasattr(self.connector, "run_turn_streaming"):
             return self._run_with_progress(
@@ -589,10 +622,18 @@ class ApprovalHandler:
                 phase=phase,
                 team_context=team_context,
                 egress_context=egress_context,
+                allow_tools=allow_tools,
+                cwd=cwd,
             )
         return self._run_with_heartbeat(
             sender=sender,
-            runner=lambda: self._run_connector_turn(thread_id, prompt, team_context),
+            runner=lambda: self._run_connector_turn(
+                thread_id,
+                prompt,
+                team_context,
+                allow_tools=allow_tools,
+                cwd=cwd,
+            ),
             run_id=run_id,
             step=step,
             phase=phase,
@@ -629,6 +670,9 @@ class ApprovalHandler:
         phase: str,
         team_context: dict[str, Any] | None = None,
         egress_context: dict[str, Any] | None = None,
+        *,
+        allow_tools: bool = False,
+        cwd: str | None = None,
     ) -> str:
         last_update = 0.0
         progress_state: dict[str, Any] = {
@@ -657,7 +701,14 @@ class ApprovalHandler:
 
         return self._run_with_heartbeat(
             sender=sender,
-            runner=lambda: self._run_connector_turn_streaming(thread_id, prompt, on_progress, team_context),
+            runner=lambda: self._run_connector_turn_streaming(
+                thread_id,
+                prompt,
+                on_progress,
+                team_context,
+                allow_tools=allow_tools,
+                cwd=cwd,
+            ),
             run_id=run_id,
             step=step,
             phase=phase,

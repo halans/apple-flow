@@ -8,7 +8,7 @@ Apple Flow is a local-first daemon that bridges iMessage, Apple Mail, Apple Remi
 
 The project also ships an optional **Autonomous Companion Layer**: a proactive loop (`companion.py`) that watches for stale approvals, upcoming calendar events, overdue reminders, and office inbox items, synthesizes observations via AI, and sends proactive iMessages. Companion state is anchored in `agent-office/` — a structured workspace directory that holds the companion's identity (`SOUL.md`), durable memory (`MEMORY.md`), topic memory files, daily notes, project briefs, and automation playbooks.
 
-**Version:** 0.3.1 | **Python:** ≥3.11 | **Package name:** `apple-flow`
+**Version:** 0.4.0 | **Python:** ≥3.11 | **Package name:** `apple-flow`
 
 ## Development Commands
 
@@ -232,7 +232,7 @@ All settings use `apple_flow_` env prefix. Key settings in `.env`:
 
 ### Connector Settings
 
-- `apple_flow_connector` - connector to use: `"codex-cli"` (default), `"claude-cli"`, `"gemini-cli"`, `"cline"`, `"codex-app-server"` (deprecated)
+- `apple_flow_connector` - connector to use: `"codex-cli"` (default), `"claude-cli"`, `"gemini-cli"`, `"cline"`, `"ollama"`, `"codex-app-server"` (deprecated)
 - `apple_flow_codex_turn_timeout_seconds` - timeout for all connectors (default: 300s/5min)
 
 **Codex CLI** (`connector=codex-cli`, requires `codex login`):
@@ -258,6 +258,10 @@ All settings use `apple_flow_` env prefix. Key settings in `.env`:
 - `apple_flow_cline_model` - model to use (e.g. `claude-sonnet-4-5-20250929`, `gpt-4o`, `deepseek-v3`; empty = cline default)
 - `apple_flow_cline_workspace` - workspace directory for cline (default: from `default_workspace`)
 - `apple_flow_cline_timeout` - timeout in seconds (default: 300)
+
+**Ollama** (`connector=ollama`, local native API):
+- `apple_flow_ollama_base_url` - Ollama API base URL (default: `http://127.0.0.1:11434`)
+- `apple_flow_ollama_model` - model name (default: `qwen3.5:4b`)
 
 **Legacy app-server** (`connector=codex-app-server`, deprecated):
 - `apple_flow_codex_app_server_cmd` - app-server command
@@ -443,6 +447,7 @@ tests/test_ambient.py             # AmbientScanner: passive context enrichment, 
   - `codex login` — if using `apple_flow_connector=codex-cli` (default)
   - `claude auth login` — if using `apple_flow_connector=claude-cli`
   - `gemini auth login` — if using `apple_flow_connector=gemini-cli`
+  - For `ollama`, run local Ollama service (`ollama serve`)
 - For Apple Mail integration: Apple Mail configured and running on this Mac
 - For Apple Reminders integration: Reminders.app on this Mac, a list named per config (default: "Codex Tasks")
 - For Apple Notes integration: Notes.app on this Mac, a folder named per config (default: "Codex Inbox")
@@ -487,6 +492,7 @@ Follow the established pattern: create `<app>_ingress.py` and `<app>_egress.py`,
 - `"claude-cli"`: `claude_cli_connector.py` — stateless `claude -p`, requires `claude auth login`
 - `"gemini-cli"`: `gemini_cli_connector.py` — stateless `gemini -p`, requires `gemini auth login`
 - `"cline"`: `cline_connector.py` — agentic `cline -y`, supports any model provider (OpenAI, Anthropic, Google, DeepSeek, etc.)
+- `"ollama"`: `ollama_connector.py` — native `/api/chat` connector (local Ollama)
 - `"codex-app-server"` (deprecated): `codex_connector.py` — stateful JSON-RPC, prone to state corruption
 - Selection controlled by `apple_flow_connector` config field (falls back to `apple_flow_use_codex_cli` for backwards compat)
 

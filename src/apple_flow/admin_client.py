@@ -41,7 +41,7 @@ class AdminClient:
     def audit_events(self, limit: int = 200) -> list[dict[str, Any]]:
         """Get recent audit events."""
         with httpx.Client(timeout=self.timeout) as client:
-            response = client.get(f"{self.base_url}/events", params={"limit": limit})
+            response = client.get(f"{self.base_url}/audit/events", params={"limit": limit})
             response.raise_for_status()
             return response.json()
 

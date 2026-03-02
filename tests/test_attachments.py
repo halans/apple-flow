@@ -2,12 +2,13 @@
 
 from conftest import FakeConnector, FakeEgress, FakeStore
 
+from apple_flow.attachments import AttachmentProcessor
 from apple_flow.commanding import CommandKind
 from apple_flow.models import InboundMessage
 from apple_flow.orchestrator import RelayOrchestrator
 
 
-def _make_orchestrator(enable_attachments=True):
+def _make_orchestrator(enable_attachments=True, attachment_processor=None):
     return RelayOrchestrator(
         connector=FakeConnector(),
         egress=FakeEgress(),
@@ -16,11 +17,17 @@ def _make_orchestrator(enable_attachments=True):
         default_workspace="/workspace/default",
         require_chat_prefix=False,
         enable_attachments=enable_attachments,
+        attachment_processor=attachment_processor,
     )
 
 
-def test_attachment_context_injected_into_prompt():
-    orch = _make_orchestrator(enable_attachments=True)
+def test_attachment_context_injected_into_prompt(tmp_path):
+    file_path = tmp_path / "data.csv"
+    file_path.write_text("name,score\nalice,99\n", encoding="utf-8")
+    orch = _make_orchestrator(
+        enable_attachments=True,
+        attachment_processor=AttachmentProcessor(),
+    )
 
     msg = InboundMessage(
         id="m1",
@@ -33,7 +40,7 @@ def test_attachment_context_injected_into_prompt():
                 {
                     "filename": "data.csv",
                     "mime_type": "text/csv",
-                    "path": "/tmp/data.csv",
+                    "path": str(file_path),
                     "size_bytes": "1024",
                 }
             ]
@@ -43,9 +50,10 @@ def test_attachment_context_injected_into_prompt():
     assert result.kind is CommandKind.IDEA
 
     _, prompt = orch.connector.turns[0]
-    assert "Attached files:" in prompt
+    assert "Attached files (processed):" in prompt
     assert "data.csv" in prompt
     assert "text/csv" in prompt
+    assert "alice,99" in prompt
 
 
 def test_attachment_context_not_injected_when_disabled():
@@ -70,7 +78,7 @@ def test_attachment_context_not_injected_when_disabled():
     )
     orch.handle_message(msg)
     _, prompt = orch.connector.turns[0]
-    assert "Attached files:" not in prompt
+    assert "Attached files (processed):" not in prompt
 
 
 def test_no_attachments_no_injection():
@@ -85,11 +93,14 @@ def test_no_attachments_no_injection():
     )
     orch.handle_message(msg)
     _, prompt = orch.connector.turns[0]
-    assert "Attached files:" not in prompt
+    assert "Attached files (processed):" not in prompt
 
 
 def test_multiple_attachments_all_listed():
-    orch = _make_orchestrator(enable_attachments=True)
+    orch = _make_orchestrator(
+        enable_attachments=True,
+        attachment_processor=AttachmentProcessor(),
+    )
 
     msg = InboundMessage(
         id="m1",
@@ -108,3 +119,4 @@ def test_multiple_attachments_all_listed():
     _, prompt = orch.connector.turns[0]
     assert "file1.txt" in prompt
     assert "image.png" in prompt
+    assert "status=missing_file" in prompt
