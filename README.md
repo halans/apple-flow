@@ -17,6 +17,34 @@ Control AI from iMessage, Mail, Reminders, Notes, and Calendar on macOS.
 
 Apple Flow is a local-first macOS daemon that bridges Apple apps to AI CLIs (Codex, Claude, Gemini, Cline, and Kilo). It enforces sender allowlists, approval gates for mutating work, and workspace restrictions by default.
 
+## Screenshots
+
+| Dashboard | Task Management |
+|---|---|
+| ![Apple Flow dashboard](docs/screenshots/dashboard.png) | ![Apple Flow task management](docs/screenshots/task-management.png) |
+
+| AI Policy Log | Calendar Event |
+|---|---|
+| ![Apple Flow AI policy log](docs/screenshots/ai-policy-log.png) | ![Apple Flow calendar event](docs/screenshots/calendar-event.png) |
+
+| Office Brainstorm |
+|---|
+| ![Apple Flow office brainstorm](docs/screenshots/office-brainstorm.png) |
+
+### Dashboard App
+
+| Onboarding 1 | Onboarding 2 |
+|---|---|
+| ![Apple Flow onboarding step 1](docs/screenshots/onboarding-apple-flow1.png) | ![Apple Flow onboarding step 2](docs/screenshots/onboarding-apple-flow2.png) |
+
+| Onboarding 3 | Onboarding 4 |
+|---|---|
+| ![Apple Flow onboarding step 3](docs/screenshots/onboarding-apple-flow3.png) | ![Apple Flow onboarding step 4](docs/screenshots/onboarding-apple-flow4.png) |
+
+| Setup Configuration | Onboarding Error |
+|---|---|
+| ![Apple Flow app setup configuration](docs/screenshots/AppleFlowApp-setup-configuration-screen..png) | ![Apple Flow onboarding error screen](docs/screenshots/apple-flow-onboarding-error..png) |
+
 ## Start Here
 
 Choose one setup path:
