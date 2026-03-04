@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import subprocess
 from unittest.mock import MagicMock, patch
 
@@ -30,6 +31,16 @@ from apple_flow.apple_tools import (
     notes_list,
     notes_list_folders,
     notes_search,
+    numbers_add_sheet,
+    numbers_append_rows,
+    numbers_create,
+    numbers_create_workbook,
+    numbers_style_apply,
+    pages_append,
+    pages_create,
+    pages_from_markdown,
+    pages_template,
+    pages_update_sections,
     reminders_complete,
     reminders_create,
     reminders_list,
@@ -98,6 +109,77 @@ class TestRunScript:
     def test_returns_none_on_unexpected_exception(self):
         with patch("subprocess.run", side_effect=RuntimeError("oops")):
             assert _run_script("x") is None
+
+    def test_retries_transient_connection_invalid_then_succeeds(self):
+        first = _err_result(
+            "Connection Invalid error for service com.apple.hiservices-xpcservice.\n"
+            "Error received in message reply handler: Connection invalid"
+        )
+        second = _ok_result("ready")
+        with patch("subprocess.run", side_effect=[first, second]) as run_mock:
+            with patch("apple_flow.apple_tools.time.sleep") as sleep_mock:
+                assert _run_script("x") == "ready"
+                assert run_mock.call_count == 2
+                sleep_mock.assert_called_once()
+
+    def test_transient_connection_invalid_exhausts_retries(self):
+        transient = _err_result(
+            "Connection Invalid error for service com.apple.hiservices-xpcservice.\n"
+            "Error received in message reply handler: Connection invalid"
+        )
+        with patch("subprocess.run", side_effect=[transient] * 8) as run_mock:
+            with patch("apple_flow.apple_tools.time.sleep") as sleep_mock:
+                assert _run_script("x") is None
+                assert run_mock.call_count == 8
+                assert sleep_mock.call_count == 7
+
+
+# ---------------------------------------------------------------------------
+# AppleScript target resolution
+# ---------------------------------------------------------------------------
+
+class TestAppleScriptTargetResolution:
+    def test_resolve_uses_bundle_id_before_name_fallback(self):
+        with patch("apple_flow.apple_tools._probe_applescript_target", side_effect=[False, True]):
+            result = at._resolve_applescript_app(("com.apple.A", "com.apple.B"), "App")
+            assert result == 'application id "com.apple.B"'
+
+    def test_resolve_can_use_name_fallback(self):
+        with patch("apple_flow.apple_tools._probe_applescript_target", side_effect=[False, False, True]):
+            result = at._resolve_applescript_app(("com.apple.A", "com.apple.B"), "App")
+            assert result == 'application "App"'
+
+    def test_resolve_candidates_returns_first_scriptable_target(self):
+        with patch("apple_flow.apple_tools._probe_applescript_target", side_effect=[False, False, True]):
+            result = at._resolve_applescript_target_candidates(
+                (
+                    'application id "com.apple.Numbers"',
+                    'application id "com.apple.iWork.Numbers"',
+                    'application "/Applications/Numbers Creator Studio.app"',
+                ),
+                fallback='application id "com.apple.Numbers"',
+                app_label="Numbers",
+            )
+            assert result == 'application "/Applications/Numbers Creator Studio.app"'
+
+    def test_numbers_target_tries_creator_studio_candidates(self):
+        with patch("apple_flow.apple_tools._probe_applescript_target", side_effect=[False, False, True]):
+            result = at._numbers_app_target()
+            assert result == 'application "/Applications/Numbers Creator Studio.app"'
+
+    def test_pages_target_tries_creator_studio_candidates(self):
+        with patch("apple_flow.apple_tools._probe_applescript_target", side_effect=[False, False, True]):
+            result = at._pages_app_target()
+            assert result == 'application "/Applications/Pages Creator Studio.app"'
+
+    def test_warm_pages_app_uses_first_available_target(self):
+        first_fail = _err_result("missing")
+        second_ok = _ok_result("")
+        with patch("subprocess.run", side_effect=[first_fail, second_ok]) as run_mock:
+            with patch("apple_flow.apple_tools.time.sleep") as sleep_mock:
+                assert at._warm_pages_app() is True
+                assert run_mock.call_count == 2
+                sleep_mock.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +279,7 @@ class TestToolsContext:
         assert len(TOOLS_CONTEXT) > 100
 
     def test_mentions_all_categories(self):
-        for category in ("NOTES", "MAIL", "REMINDERS", "CALENDAR", "MESSAGES"):
+        for category in ("NOTES", "PAGES", "NUMBERS", "MAIL", "REMINDERS", "CALENDAR", "MESSAGES"):
             assert category in TOOLS_CONTEXT, f"TOOLS_CONTEXT missing category: {category}"
 
     def test_mentions_apple_flow_tools(self):
@@ -352,6 +434,581 @@ class TestNotesAppend:
     def test_returns_false_on_file_not_found(self):
         with patch("subprocess.run", side_effect=FileNotFoundError):
             assert notes_append("x", "y") is False
+
+
+# ---------------------------------------------------------------------------
+# Apple Pages
+# ---------------------------------------------------------------------------
+
+class TestPagesCreate:
+    def test_returns_path_on_success(self, tmp_path):
+        path = tmp_path / "doc.pages"
+        with patch("subprocess.run", return_value=_ok_result(str(path))):
+            result = pages_create(str(path), "Title", "Body")
+            assert result == str(path)
+
+    def test_requires_absolute_path(self):
+        with patch("subprocess.run", return_value=_ok_result("/tmp/x.pages")):
+            assert pages_create("relative.pages", "T", "B") is None
+
+    def test_requires_pages_extension(self):
+        with patch("subprocess.run", return_value=_ok_result("/tmp/x.txt")):
+            assert pages_create("/tmp/x.txt", "T", "B") is None
+
+    def test_respects_overwrite_false(self, tmp_path):
+        path = tmp_path / "exists.pages"
+        path.write_text("x", encoding="utf-8")
+        with patch("subprocess.run", return_value=_ok_result(str(path))):
+            assert pages_create(str(path), "T", "B", overwrite=False) is None
+
+
+class TestPagesAppend:
+    def test_returns_true_on_ok(self, tmp_path):
+        path = tmp_path / "doc.pages"
+        path.write_text("x", encoding="utf-8")
+        with patch("subprocess.run", return_value=_ok_result("ok")):
+            assert pages_append(str(path), "hello") is True
+
+    def test_requires_existing_target(self):
+        with patch("subprocess.run", return_value=_ok_result("ok")):
+            assert pages_append("/tmp/does-not-exist.pages", "hello") is False
+
+    def test_requires_pages_extension(self, tmp_path):
+        path = tmp_path / "doc.txt"
+        path.write_text("x", encoding="utf-8")
+        with patch("subprocess.run", return_value=_ok_result("ok")):
+            assert pages_append(str(path), "hello") is False
+
+
+class TestPagesFromMarkdown:
+    def test_requires_existing_input_file(self, tmp_path):
+        missing = tmp_path / "missing.md"
+        result = pages_from_markdown(str(missing))
+        assert result["ok"] is False
+        assert "input file not found" in result["error"]
+
+    def test_default_output_path_and_success(self, tmp_path):
+        source = tmp_path / "proposal.md"
+        source.write_text("# Title\n\nHello **world**", encoding="utf-8")
+        (tmp_path / "proposal.pages").write_text("existing", encoding="utf-8")
+
+        with patch("subprocess.run", return_value=_ok_result("")) as run_mock:
+            with patch("apple_flow.apple_tools._warm_pages_app", return_value=True):
+                with patch("apple_flow.apple_tools._pages_app_target", return_value='application id "com.apple.Pages"'):
+                    with patch("apple_flow.apple_tools._run_script", return_value="ok"):
+                        result = pages_from_markdown(str(source), overwrite=True)
+
+        assert result["ok"] is True
+        assert result["output_path"].endswith("proposal.pages")
+        assert result["stats"]["headings"] == 1
+        assert result["stats"]["paragraphs"] == 1
+        assert run_mock.call_count >= 1
+
+    def test_respects_overwrite_false(self, tmp_path):
+        source = tmp_path / "doc.md"
+        source.write_text("hello", encoding="utf-8")
+        output = tmp_path / "doc.pages"
+        output.write_text("existing", encoding="utf-8")
+
+        result = pages_from_markdown(str(source), output_path=str(output), overwrite=False)
+        assert result["ok"] is False
+        assert "overwrite=false" in result["error"]
+
+    def test_returns_error_when_textutil_fails(self, tmp_path):
+        source = tmp_path / "doc.md"
+        source.write_text("# X", encoding="utf-8")
+
+        with patch("subprocess.run", return_value=_err_result("textutil failed")):
+            with patch("apple_flow.apple_tools._warm_pages_app", return_value=True):
+                with patch("apple_flow.apple_tools._run_script", return_value="ok"):
+                    result = pages_from_markdown(str(source), overwrite=True)
+
+        assert result["ok"] is False
+        assert "textutil failed" in result["error"]
+
+    def test_includes_table_stats(self, tmp_path):
+        source = tmp_path / "table.md"
+        source.write_text(
+            "| Plan | Price |\n| --- | --- |\n| Core | $100 |\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "table.pages").write_text("existing", encoding="utf-8")
+
+        with patch("subprocess.run", return_value=_ok_result("")):
+            with patch("apple_flow.apple_tools._warm_pages_app", return_value=True):
+                with patch("apple_flow.apple_tools._pages_app_target", return_value='application id "com.apple.Pages"'):
+                    with patch("apple_flow.apple_tools._run_script", return_value="ok"):
+                        result = pages_from_markdown(str(source), overwrite=True)
+
+        assert result["ok"] is True
+        assert result["stats"]["table_count"] == 1
+
+    def test_accepts_stdin_input(self, tmp_path):
+        output = tmp_path / "stdin.pages"
+        output.write_text("existing", encoding="utf-8")
+        md = io.StringIO("# Live Report\n\n- point one\n- point two\n")
+
+        with patch("sys.stdin", md):
+            with patch("subprocess.run", return_value=_ok_result("")):
+                with patch("apple_flow.apple_tools._warm_pages_app", return_value=True):
+                    with patch("apple_flow.apple_tools._pages_app_target", return_value='application id "com.apple.Pages"'):
+                        with patch("apple_flow.apple_tools._run_script", return_value="ok"):
+                            result = pages_from_markdown("-", output_path=str(output), overwrite=True)
+
+        assert result["ok"] is True
+        assert result["input_path"] == "<stdin>"
+        assert result["output_path"] == str(output)
+
+    def test_rejects_empty_stdin(self):
+        with patch("sys.stdin", io.StringIO("")):
+            result = pages_from_markdown("-", output_path="/tmp/empty.pages", overwrite=True)
+        assert result["ok"] is False
+        assert "stdin markdown input is empty" in result["error"]
+
+    def test_supports_theme_export_and_qa(self, tmp_path):
+        source = tmp_path / "research.md"
+        source.write_text(
+            "# AI Agents\n\nSee [Paper](https://example.com/paper).\n",
+            encoding="utf-8",
+        )
+        output = tmp_path / "research.pages"
+        output.write_text("existing", encoding="utf-8")
+
+        with patch("subprocess.run", return_value=_ok_result("")):
+            with patch("apple_flow.apple_tools._warm_pages_app", return_value=True):
+                with patch("apple_flow.apple_tools._pages_app_target", return_value='application id "com.apple.Pages"'):
+                    with patch("apple_flow.apple_tools._run_script", return_value="ok"):
+                        result = pages_from_markdown(
+                            str(source),
+                            output_path=str(output),
+                            theme="corporate",
+                            toc="on",
+                            citations="on",
+                            images="off",
+                            qa=True,
+                            export="pdf",
+                            overwrite=True,
+                        )
+
+        assert result["ok"] is True
+        assert result["theme"] == "corporate"
+        assert result["options"]["toc"] is True
+        assert "qa_report" in result
+        assert result["qa_report"]["word_count"] > 0
+        assert result["exports"]["pdf"].endswith(".pdf")
+
+    def test_page_break_marker_updates_stats(self, tmp_path):
+        source = tmp_path / "breaks.md"
+        source.write_text("# One\n\n[[PB]]\n\n# Two\n", encoding="utf-8")
+        output = tmp_path / "breaks.pages"
+        output.write_text("existing", encoding="utf-8")
+
+        with patch("subprocess.run", return_value=_ok_result("")):
+            with patch("apple_flow.apple_tools._warm_pages_app", return_value=True):
+                with patch("apple_flow.apple_tools._pages_app_target", return_value='application id "com.apple.Pages"'):
+                    with patch("apple_flow.apple_tools._run_script", return_value="ok"):
+                        result = pages_from_markdown(
+                            str(source),
+                            output_path=str(output),
+                            page_break_marker="[[PB]]",
+                            overwrite=True,
+                        )
+
+        assert result["ok"] is True
+        assert result["stats"]["page_breaks"] >= 1
+
+
+class TestPagesUpdateSections:
+    def test_merges_requested_sections_and_renders(self, tmp_path):
+        base = tmp_path / "base.md"
+        base.write_text(
+            "# Overview\n\nOld intro.\n\n## Scope\n\nOld scope.\n\n## Timeline\n\nOld timeline.\n",
+            encoding="utf-8",
+        )
+        updates = tmp_path / "updates.md"
+        updates.write_text(
+            "## Scope\n\nNew scope details.\n\n## Risks\n\nNew risk note.\n",
+            encoding="utf-8",
+        )
+        output = tmp_path / "merged.pages"
+        output.write_text("existing", encoding="utf-8")
+
+        with patch("subprocess.run", return_value=_ok_result("")):
+            with patch("apple_flow.apple_tools._warm_pages_app", return_value=True):
+                with patch("apple_flow.apple_tools._pages_app_target", return_value='application id "com.apple.Pages"'):
+                    with patch("apple_flow.apple_tools._run_script", return_value="ok"):
+                        result = pages_update_sections(
+                            str(base),
+                            str(updates),
+                            str(output),
+                            sections="Scope,Risks",
+                            overwrite=True,
+                        )
+
+        assert result["ok"] is True
+        assert result["merge"]["applied_sections"] == ["Scope"]
+        assert result["merge"]["appended_sections"] == ["Risks"]
+
+
+class TestPagesTemplate:
+    def test_creates_research_template(self, tmp_path):
+        output = tmp_path / "research-template.md"
+        result = pages_template("research", str(output))
+        assert result["ok"] is True
+        assert output.exists()
+        assert "# Executive Summary" in output.read_text(encoding="utf-8")
+
+    def test_rejects_unknown_template(self):
+        result = pages_template("unknown-template")
+        assert result["ok"] is False
+        assert "unsupported template type" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Apple Numbers
+# ---------------------------------------------------------------------------
+
+class TestNumbersCreate:
+    def test_returns_path_on_success(self, tmp_path):
+        path = tmp_path / "sheet.numbers"
+        with patch("subprocess.run", return_value=_ok_result(str(path))):
+            result = numbers_create(str(path), headers=["Name", "Score"])
+            assert result == str(path)
+
+    def test_requires_headers(self, tmp_path):
+        path = tmp_path / "sheet.numbers"
+        with patch("subprocess.run", return_value=_ok_result(str(path))):
+            assert numbers_create(str(path), headers=[]) is None
+
+    def test_requires_numbers_extension(self):
+        with patch("subprocess.run", return_value=_ok_result("/tmp/x.txt")):
+            assert numbers_create("/tmp/x.txt", headers=["A"]) is None
+
+    def test_expands_columns_for_wide_headers(self, tmp_path):
+        path = tmp_path / "sheet.numbers"
+        captured: dict[str, str] = {}
+
+        def _capture(*args, **kwargs):
+            cmd = args[0]
+            captured["script"] = cmd[2]
+            return _ok_result(str(path))
+
+        with patch("subprocess.run", side_effect=_capture):
+            result = numbers_create(str(path), headers=[f"H{i}" for i in range(1, 11)])
+
+        assert result == str(path)
+        script = captured.get("script", "")
+        assert "set requiredCols to 10" in script
+        assert "make new column at end of columns" in script
+
+
+class TestNumbersAppendRows:
+    def test_returns_structured_success(self, tmp_path):
+        path = tmp_path / "sheet.numbers"
+        path.write_text("x", encoding="utf-8")
+        with patch("subprocess.run", return_value=_ok_result("ok|2|1")):
+            result = numbers_append_rows(str(path), [["a", 1], ["b", 2]])
+            assert result["ok"] is True
+            assert result["inserted_rows"] == 2
+            assert result["start_row"] == 2
+
+    def test_after_headers_uses_insert_before_anchor_logic(self, tmp_path):
+        path = tmp_path / "sheet.numbers"
+        path.write_text("x", encoding="utf-8")
+        captured: dict[str, str] = {}
+
+        def _capture(*args, **kwargs):
+            cmd = args[0]
+            captured["script"] = cmd[2]
+            return _ok_result("ok|2|2")
+
+        with patch("subprocess.run", side_effect=_capture):
+            result = numbers_append_rows(str(path), [["new", 5]], insert_position="after-headers")
+
+        assert result["ok"] is True
+        assert result["insert_position"] == "after-headers"
+        assert result["start_row"] == 2
+        script = captured.get("script", "")
+        assert 'if "after-headers" is "after-headers" then' in script
+        assert "set anchorRow to row insertionRow" in script
+        assert "set targetRow to make new row at before anchorRow" in script
+
+    def test_after_data_uses_last_data_scan_and_reuses_existing_blank_rows(self, tmp_path):
+        path = tmp_path / "sheet.numbers"
+        path.write_text("x", encoding="utf-8")
+        captured: dict[str, str] = {}
+
+        def _capture(*args, **kwargs):
+            cmd = args[0]
+            captured["script"] = cmd[2]
+            return _ok_result("ok|3|4")
+
+        with patch("subprocess.run", side_effect=_capture):
+            result = numbers_append_rows(str(path), [["coffee", 15], ["burger", 30]], insert_position="after-data")
+
+        assert result["ok"] is True
+        assert result["start_row"] == 3
+        assert result["insert_after_row"] == 4
+        script = captured.get("script", "")
+        assert "repeat with r from dataStartRow to totalRows" in script
+        assert "set cellVal to value of cell c of row r" in script
+        assert "set targetRow to row insertionRow" in script
+
+    def test_at_end_always_appends_new_rows(self, tmp_path):
+        path = tmp_path / "sheet.numbers"
+        path.write_text("x", encoding="utf-8")
+        captured: dict[str, str] = {}
+
+        def _capture(*args, **kwargs):
+            cmd = args[0]
+            captured["script"] = cmd[2]
+            return _ok_result("ok|10|11")
+
+        with patch("subprocess.run", side_effect=_capture):
+            result = numbers_append_rows(str(path), [["x"], ["y"]], insert_position="at-end")
+
+        assert result["ok"] is True
+        assert result["start_row"] == 10
+        assert result["insert_after_row"] == 11
+        assert result["inserted_rows"] == 2
+        script = captured.get("script", "")
+        assert 'else if "at-end" is "at-end" then' in script
+        assert "set insertionRow to totalRows + 1" in script
+        assert "set targetRow to make new row at end of rows" in script
+
+    def test_requires_existing_file(self):
+        result = numbers_append_rows("/tmp/missing.numbers", [["x"]])
+        assert result["ok"] is False
+
+    def test_rejects_invalid_insert_position(self, tmp_path):
+        path = tmp_path / "sheet.numbers"
+        path.write_text("x", encoding="utf-8")
+        result = numbers_append_rows(str(path), [["x"]], insert_position="middle")
+        assert result["ok"] is False
+
+    def test_expands_columns_for_wide_rows(self, tmp_path):
+        path = tmp_path / "sheet.numbers"
+        path.write_text("x", encoding="utf-8")
+        captured: dict[str, str] = {}
+
+        def _capture(*args, **kwargs):
+            cmd = args[0]
+            captured["script"] = cmd[2]
+            return _ok_result("ok|2|2")
+
+        with patch("subprocess.run", side_effect=_capture):
+            result = numbers_append_rows(str(path), [[1, 2, 3, 4, 5, 6, 7, 8, 9]])
+
+        assert result["ok"] is True
+        script = captured.get("script", "")
+        assert "set requiredCols to 9" in script
+        assert "make new column at end of columns" in script
+
+
+class TestNumbersWorkbook:
+    def test_add_sheet_returns_structured_success(self, tmp_path):
+        path = tmp_path / "book.numbers"
+        path.write_text("x", encoding="utf-8")
+        with patch("subprocess.run", return_value=_ok_result("ok|2")):
+            result = numbers_add_sheet(
+                str(path),
+                {
+                    "sheet_name": "Summary",
+                    "table_name": "SummaryTable",
+                    "headers": ["Metric", "Value"],
+                    "rows": [["Total", 45], ["Count", 2]],
+                },
+            )
+        assert result["ok"] is True
+        assert result["sheet_name"] == "Summary"
+        assert result["rows_inserted"] == 2
+
+    def test_add_sheet_prefers_row_2_before_appending(self, tmp_path):
+        path = tmp_path / "book.numbers"
+        path.write_text("x", encoding="utf-8")
+        captured: dict[str, str] = {}
+
+        def _capture(*args, **kwargs):
+            cmd = args[0]
+            captured["script"] = cmd[2]
+            return _ok_result("ok|1")
+
+        with patch("subprocess.run", side_effect=_capture):
+            result = numbers_add_sheet(
+                str(path),
+                {
+                    "sheet_name": "Summary",
+                    "table_name": "SummaryTable",
+                    "headers": ["Metric", "Value"],
+                    "rows": [["Total", 45]],
+                },
+            )
+
+        assert result["ok"] is True
+        script = captured.get("script", "")
+        assert "set insertionRow to 2" in script
+        assert "if insertionRow <= totalRows then" in script
+        assert "set targetRow to row insertionRow" in script
+        assert "set insertionRow to insertionRow + 1" in script
+
+    def test_add_sheet_rejects_bad_spec(self, tmp_path):
+        path = tmp_path / "book.numbers"
+        path.write_text("x", encoding="utf-8")
+        result = numbers_add_sheet(str(path), {"sheet_name": "", "headers": []})
+        assert result["ok"] is False
+        assert "sheet_name" in result["error"] or "headers" in result["error"]
+
+    def test_create_workbook_uses_create_and_add_sheet(self, tmp_path):
+        path = tmp_path / "book.numbers"
+        with patch("apple_flow.apple_tools.numbers_create", return_value=str(path)) as create_mock:
+            with patch("apple_flow.apple_tools.numbers_append_rows", return_value={"ok": True, "inserted_rows": 1}) as append_mock:
+                with patch("apple_flow.apple_tools.numbers_add_sheet", return_value={"ok": True, "rows_inserted": 2}) as add_mock:
+                    result = numbers_create_workbook(
+                        str(path),
+                        {
+                            "sheets": [
+                                {
+                                    "sheet_name": "Transactions",
+                                    "table_name": "Tx",
+                                    "headers": ["Date", "Item", "Amount"],
+                                    "rows": [["2026-03-04", "Coffee", 15]],
+                                },
+                                {
+                                    "sheet_name": "Summary",
+                                    "table_name": "Summary",
+                                    "headers": ["Metric", "Value"],
+                                    "rows": [["Total", 15], ["Count", 1]],
+                                },
+                            ]
+                        },
+                        overwrite=True,
+                    )
+
+        assert result["ok"] is True
+        assert result["sheets_created"] == 2
+        assert result["rows_inserted_total"] == 3
+        create_mock.assert_called_once()
+        append_mock.assert_called_once()
+        add_mock.assert_called_once()
+
+    def test_create_workbook_rejects_duplicate_sheet_names(self, tmp_path):
+        path = tmp_path / "book.numbers"
+        result = numbers_create_workbook(
+            str(path),
+            {
+                "sheets": [
+                    {"sheet_name": "Summary", "headers": ["A"]},
+                    {"sheet_name": "summary", "headers": ["B"]},
+                ]
+            },
+        )
+        assert result["ok"] is False
+        assert "duplicate sheet_name" in result["error"]
+
+
+class TestNumbersStyleApply:
+    def test_requires_existing_file(self):
+        result = numbers_style_apply(
+            "/tmp/missing.numbers",
+            target={"scope": "table"},
+            style={"font_size": 12},
+        )
+        assert result["ok"] is False
+
+    def test_rejects_invalid_target_scope(self, tmp_path):
+        path = tmp_path / "sheet.numbers"
+        path.write_text("x", encoding="utf-8")
+        result = numbers_style_apply(
+            str(path),
+            target={"scope": "grid"},
+            style={"font_size": 12},
+        )
+        assert result["ok"] is False
+        assert "target_json.scope" in result["error"]
+
+    def test_rejects_unknown_style_key(self, tmp_path):
+        path = tmp_path / "sheet.numbers"
+        path.write_text("x", encoding="utf-8")
+        result = numbers_style_apply(
+            str(path),
+            target={"scope": "table"},
+            style={"theme": "sunset"},
+        )
+        assert result["ok"] is False
+        assert "unsupported style key" in result["error"]
+
+    def test_rejects_column_width_for_row_scope(self, tmp_path):
+        path = tmp_path / "sheet.numbers"
+        path.write_text("x", encoding="utf-8")
+        result = numbers_style_apply(
+            str(path),
+            target={"scope": "row", "index": 2},
+            style={"column_width": 140},
+        )
+        assert result["ok"] is False
+        assert "column_width is not supported for row target scope" in result["error"]
+
+    def test_normalizes_8bit_rgb_to_16bit_in_script(self, tmp_path):
+        path = tmp_path / "sheet.numbers"
+        path.write_text("x", encoding="utf-8")
+        captured: dict[str, str] = {}
+
+        def _capture(*args, **kwargs):
+            cmd = args[0]
+            captured["script"] = cmd[2]
+            return _ok_result("ok|1|0|0")
+
+        with patch("subprocess.run", side_effect=_capture):
+            result = numbers_style_apply(
+                str(path),
+                target={"scope": "cell", "row": 2, "column": 1},
+                style={"background_color": [255, 0, 128]},
+            )
+
+        assert result["ok"] is True
+        script = captured.get("script", "")
+        assert "set background color of cellRef to {65535, 0, 32896}" in script
+
+    def test_range_scope_builds_expected_loop_and_counts(self, tmp_path):
+        path = tmp_path / "sheet.numbers"
+        path.write_text("x", encoding="utf-8")
+        captured: dict[str, str] = {}
+
+        def _capture(*args, **kwargs):
+            cmd = args[0]
+            captured["script"] = cmd[2]
+            return _ok_result("ok|6|3|2")
+
+        with patch("subprocess.run", side_effect=_capture):
+            result = numbers_style_apply(
+                str(path),
+                target={
+                    "scope": "range",
+                    "start_row": 2,
+                    "end_row": 4,
+                    "start_column": 1,
+                    "end_column": 2,
+                },
+                style={
+                    "text_color": [0, 0, 65535],
+                    "font_size": 12,
+                    "alignment": "center",
+                    "row_height": 28,
+                    "column_width": 120,
+                    "text_wrap": True,
+                    "number_format": "currency",
+                },
+            )
+
+        assert result["ok"] is True
+        assert result["cells_touched"] == 6
+        assert result["rows_resized"] == 3
+        assert result["columns_resized"] == 2
+        script = captured.get("script", "")
+        assert "set rangeRowCount to (4 - 2) + 1" in script
+        assert "set rangeColCount to (2 - 1) + 1" in script
+        assert "set text wrap of cellRef to true" in script
+        assert "set format of cellRef to currency" in script
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +1212,7 @@ class TestMailMoveToLabel:
 
         assert result["moved"] == 1
         assert len(captured_scripts) >= 2
+        assert "first message of sourceBox whose id is 21702" in captured_scripts[1]
         assert "whose id is 21702" in captured_scripts[1]
         assert 'whose id as text is "21702"' not in captured_scripts[1]
 
@@ -574,6 +1232,7 @@ class TestMailMoveToLabel:
 
         assert result["moved"] == 1
         assert len(captured_scripts) >= 2
+        assert 'first message of sourceBox whose id as text is "msg-abc"' in captured_scripts[1]
         assert 'whose id as text is "msg-abc"' in captured_scripts[1]
 
     def test_returns_error_for_ambiguous_label(self):

@@ -33,6 +33,16 @@ from .apple_tools import (
     notes_list,
     notes_list_folders,
     notes_search,
+    numbers_add_sheet,
+    numbers_append_rows,
+    numbers_create,
+    numbers_create_workbook,
+    numbers_style_apply,
+    pages_append,
+    pages_create,
+    pages_from_markdown,
+    pages_template,
+    pages_update_sections,
     reminders_complete,
     reminders_create,
     reminders_list,
@@ -208,6 +218,234 @@ def _run_tools_subcommand(args: argparse.Namespace) -> None:
             raise SystemExit(1)
         _output(notes_append(positional[0], positional[1], folder=args.folder or ""))
 
+    # ── Pages ──────────────────────────────────────────────────────────────
+    elif command == "pages_create":
+        if len(positional) < 3:
+            print(
+                "Usage: apple-flow tools pages_create <abs_path.pages> <title> <body> [--overwrite true|false]",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        _output(
+            pages_create(
+                positional[0],
+                positional[1],
+                positional[2],
+                overwrite=_boolish(args.overwrite, default=False),
+            )
+        )
+
+    elif command == "pages_append":
+        if len(positional) < 2:
+            print("Usage: apple-flow tools pages_append <abs_path.pages> <text>", file=sys.stderr)
+            raise SystemExit(1)
+        _output(pages_append(positional[0], positional[1]))
+
+    elif command == "pages_from_markdown":
+        if len(positional) < 1:
+            print(
+                "Usage: apple-flow tools pages_from_markdown <input.md|-> [output.pages] "
+                "[--theme auto|neutral|minimal|corporate|legal|proposal] [--style auto|neutral] "
+                "[--title-page auto|off] [--toc auto|off] [--citations auto|off] [--images auto|off] "
+                "[--image-max-width N] [--page-break-marker TEXT] [--qa true|false] "
+                "[--export none|pdf|docx|pdf,docx] [--overwrite true|false]",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        output_path = positional[1] if len(positional) >= 2 else ""
+        _output(
+            pages_from_markdown(
+                positional[0],
+                output_path=output_path,
+                style=args.style or "auto",
+                theme=args.theme or "auto",
+                title_page=args.title_page or "auto",
+                toc=args.toc or "auto",
+                citations=args.citations or "auto",
+                images=args.images or "auto",
+                image_max_width=args.image_max_width or 640,
+                page_break_marker=args.page_break_marker or "<!-- pagebreak -->",
+                qa=_boolish(args.qa, default=False),
+                export=args.export or "none",
+                overwrite=_boolish(args.overwrite, default=False),
+            )
+        )
+
+    elif command == "pages_update_sections":
+        if len(positional) < 3:
+            print(
+                "Usage: apple-flow tools pages_update_sections <base.md|-> <updates.md> <output.pages> "
+                "[--sections \"A,B\"] [--theme ...] [--style ...] [--overwrite true|false]",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        _output(
+            pages_update_sections(
+                positional[0],
+                positional[1],
+                positional[2],
+                sections=args.sections or "",
+                style=args.style or "auto",
+                theme=args.theme or "auto",
+                title_page=args.title_page or "auto",
+                toc=args.toc or "auto",
+                citations=args.citations or "auto",
+                images=args.images or "auto",
+                image_max_width=args.image_max_width or 640,
+                page_break_marker=args.page_break_marker or "<!-- pagebreak -->",
+                qa=_boolish(args.qa, default=False),
+                export=args.export or "none",
+                overwrite=_boolish(args.overwrite, default=False),
+            )
+        )
+
+    elif command == "pages_template":
+        if len(positional) < 1:
+            print(
+                "Usage: apple-flow tools pages_template <research|contract|proposal> [output.md] [--overwrite true|false]",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        template_output = positional[1] if len(positional) >= 2 else ""
+        _output(
+            pages_template(
+                positional[0],
+                output_path=template_output,
+                overwrite=_boolish(args.overwrite, default=False),
+            )
+        )
+
+    # ── Numbers ────────────────────────────────────────────────────────────
+    elif command == "numbers_create":
+        if len(positional) < 2:
+            print(
+                "Usage: apple-flow tools numbers_create <abs_path.numbers> <headers_json> [--sheet X] [--table X] [--overwrite true|false]",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        try:
+            headers_raw = json.loads(positional[1])
+            headers = [str(h) for h in headers_raw] if isinstance(headers_raw, list) else None
+        except json.JSONDecodeError:
+            headers = None
+        if not headers:
+            print("numbers_create requires a JSON array of headers", file=sys.stderr)
+            raise SystemExit(1)
+        _output(
+            numbers_create(
+                positional[0],
+                headers=headers,
+                sheet_name=args.sheet or "",
+                table_name=args.table or "",
+                overwrite=_boolish(args.overwrite, default=False),
+            )
+        )
+
+    elif command == "numbers_create_workbook":
+        if len(positional) < 2:
+            print(
+                "Usage: apple-flow tools numbers_create_workbook <abs_path.numbers> <workbook_json> [--overwrite true|false]",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        try:
+            workbook_raw = json.loads(positional[1])
+        except json.JSONDecodeError as exc:
+            print(f"Invalid workbook_json: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        if not isinstance(workbook_raw, dict):
+            print("numbers_create_workbook requires workbook_json to be a JSON object", file=sys.stderr)
+            raise SystemExit(1)
+        _output(
+            numbers_create_workbook(
+                positional[0],
+                workbook_spec=workbook_raw,
+                overwrite=_boolish(args.overwrite, default=False),
+            )
+        )
+
+    elif command == "numbers_add_sheet":
+        if len(positional) < 2:
+            print(
+                "Usage: apple-flow tools numbers_add_sheet <abs_path.numbers> <sheet_json>",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        try:
+            sheet_raw = json.loads(positional[1])
+        except json.JSONDecodeError as exc:
+            print(f"Invalid sheet_json: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        if not isinstance(sheet_raw, dict):
+            print("numbers_add_sheet requires sheet_json to be a JSON object", file=sys.stderr)
+            raise SystemExit(1)
+        _output(numbers_add_sheet(positional[0], sheet_spec=sheet_raw))
+
+    elif command == "numbers_append_rows":
+        if len(positional) < 2:
+            print(
+                "Usage: apple-flow tools numbers_append_rows <abs_path.numbers> <rows_json> [--sheet X] [--table X] [--position after-headers|after-data|at-end]",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        try:
+            rows_raw = json.loads(positional[1])
+        except json.JSONDecodeError as exc:
+            print(f"Invalid rows_json: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+
+        rows_payload: list[list[object]]
+        if isinstance(rows_raw, list) and rows_raw and all(not isinstance(i, list) for i in rows_raw):
+            rows_payload = [rows_raw]
+        elif isinstance(rows_raw, list):
+            rows_payload = [list(row) if isinstance(row, list) else [row] for row in rows_raw]
+        else:
+            print("numbers_append_rows requires a JSON array", file=sys.stderr)
+            raise SystemExit(1)
+
+        _output(
+            numbers_append_rows(
+                positional[0],
+                rows=rows_payload,
+                sheet_name=args.sheet or "",
+                table_name=args.table or "",
+                insert_position=args.position or "after-data",
+            )
+        )
+
+    elif command == "numbers_style_apply":
+        if len(positional) < 3:
+            print(
+                "Usage: apple-flow tools numbers_style_apply <abs_path.numbers> <target_json> <style_json> [--sheet X] [--table X]",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        try:
+            target_raw = json.loads(positional[1])
+        except json.JSONDecodeError as exc:
+            print(f"Invalid target_json: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        try:
+            style_raw = json.loads(positional[2])
+        except json.JSONDecodeError as exc:
+            print(f"Invalid style_json: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        if not isinstance(target_raw, dict):
+            print("numbers_style_apply requires target_json to be a JSON object", file=sys.stderr)
+            raise SystemExit(1)
+        if not isinstance(style_raw, dict):
+            print("numbers_style_apply requires style_json to be a JSON object", file=sys.stderr)
+            raise SystemExit(1)
+        _output(
+            numbers_style_apply(
+                positional[0],
+                target=target_raw,
+                style=style_raw,
+                sheet_name=args.sheet or "",
+                table_name=args.table or "",
+            )
+        )
+
     # ── Mail ───────────────────────────────────────────────────────────────
     elif command == "mail_list_unread":
         _output(mail_list_unread(account=args.account or "", mailbox=args.mailbox or "INBOX", limit=limit, as_text=as_text))
@@ -360,6 +598,47 @@ def main() -> None:
     parser.add_argument("--mailbox", dest="mailbox", metavar="MAILBOX", help="Mail mailbox name")
     parser.add_argument("--include-system", dest="include_system", metavar="BOOL", help="Include system mailboxes (true|false)")
     parser.add_argument("--label", dest="label", metavar="LABEL", help="Destination label/mailbox name")
+    parser.add_argument("--sheet", dest="sheet", metavar="SHEET", help="Numbers sheet name")
+    parser.add_argument("--table", dest="table", metavar="TABLE", help="Numbers table name")
+    parser.add_argument(
+        "--position",
+        dest="position",
+        metavar="INSERT_POSITION",
+        help="Numbers insert position: after-headers|after-data|at-end",
+    )
+    parser.add_argument("--theme", dest="theme", metavar="THEME", help="Theme preset for Pages markdown rendering")
+    parser.add_argument("--style", dest="style", metavar="STYLE", help="Style preset for supported document tools")
+    parser.add_argument("--title-page", dest="title_page", metavar="MODE", help="Title page mode: auto|on|off")
+    parser.add_argument("--toc", dest="toc", metavar="MODE", help="Table of contents mode: auto|on|off")
+    parser.add_argument("--citations", dest="citations", metavar="MODE", help="Sources section mode: auto|on|off")
+    parser.add_argument("--images", dest="images", metavar="MODE", help="Image handling mode: auto|on|off")
+    parser.add_argument(
+        "--image-max-width",
+        dest="image_max_width",
+        type=int,
+        metavar="N",
+        help="Maximum image width in pixels when rendering markdown images",
+    )
+    parser.add_argument(
+        "--page-break-marker",
+        dest="page_break_marker",
+        metavar="TEXT",
+        help="Marker text in markdown that forces a page break",
+    )
+    parser.add_argument("--qa", dest="qa", metavar="BOOL", help="Include deterministic QA report in output")
+    parser.add_argument(
+        "--export",
+        dest="export",
+        metavar="TARGETS",
+        help="Export additional outputs: none|pdf|docx|pdf,docx",
+    )
+    parser.add_argument(
+        "--sections",
+        dest="sections",
+        metavar="CSV",
+        help="Comma-separated section names for pages_update_sections",
+    )
+    parser.add_argument("--overwrite", dest="overwrite", metavar="BOOL", help="Overwrite existing file for create commands")
     parser.add_argument("--message-id", dest="message_ids", action="append", help="Mail message ID (repeatable)")
     parser.add_argument("--input-file", dest="input_file", metavar="PATH", help="JSON file containing message IDs")
     parser.add_argument("--limit", dest="limit", type=int, default=20, metavar="N", help="Maximum results")

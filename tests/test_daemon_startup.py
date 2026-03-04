@@ -119,7 +119,7 @@ def test_relaydaemon_wires_gemini_approval_mode(monkeypatch, tmp_path):
     captured_kwargs: dict[str, object] = {}
 
     class _FakeStore:
-        def __init__(self, _path):
+        def __init__(self, _path, csv_audit_logger=None):
             self._conn = sqlite3.connect(":memory:")
             self._lock = threading.Lock()
 
@@ -191,7 +191,7 @@ def test_relaydaemon_wires_ollama_connector(monkeypatch, tmp_path):
     captured_kwargs: dict[str, object] = {}
 
     class _FakeStore:
-        def __init__(self, _path):
+        def __init__(self, _path, csv_audit_logger=None):
             self._conn = sqlite3.connect(":memory:")
             self._lock = threading.Lock()
 
@@ -265,7 +265,7 @@ def test_relaydaemon_initializes_memory_v2(monkeypatch, tmp_path):
     captured: dict[str, object] = {}
 
     class _FakeStore:
-        def __init__(self, _path):
+        def __init__(self, _path, csv_audit_logger=None):
             self._conn = sqlite3.connect(":memory:")
             self._lock = threading.Lock()
 

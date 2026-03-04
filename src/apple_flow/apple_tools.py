@@ -11,14 +11,45 @@ logged and empty/falsy values are returned.
 
 from __future__ import annotations
 
+import html
 import json
 import logging
+import re
 import sqlite3
 import subprocess
+import sys
+import tempfile
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("apple_flow.apple_tools")
+PAGES_APP_IDS = ("com.apple.Pages", "com.apple.iWork.Pages")
+PAGES_APP_TARGETS = (
+    'application id "com.apple.Pages"',
+    'application id "com.apple.iWork.Pages"',
+    'application "/Applications/Pages Creator Studio.app"',
+    'application "Pages Creator Studio"',
+    'application "Pages"',
+)
+PAGES_OPEN_TARGETS = (
+    "/Applications/Pages Creator Studio.app",
+    "Pages Creator Studio",
+    "Pages",
+)
+PAGES_PAGEBREAK_TOKEN = "__APPLE_FLOW_PAGE_BREAK__"
+PAGES_THEME_PRESETS = {"auto", "neutral", "minimal", "corporate", "legal", "proposal"}
+PAGES_EXPORT_PRESETS = {"none", "pdf", "docx"}
+PAGES_DEFAULT_PAGE_BREAK_MARKER = "<!-- pagebreak -->"
+NUMBERS_APP_IDS = ("com.apple.Numbers", "com.apple.iWork.Numbers")
+NUMBERS_APP_TARGETS = (
+    'application id "com.apple.Numbers"',
+    'application id "com.apple.iWork.Numbers"',
+    'application "/Applications/Numbers Creator Studio.app"',
+    'application "Numbers Creator Studio"',
+    'application "Numbers"',
+)
 
 # ---------------------------------------------------------------------------
 # TOOLS_CONTEXT — injected into AI prompts so the AI knows these tools exist
@@ -31,6 +62,16 @@ Output is JSON. Use --text for human-readable output.
 NOTES:  notes_search "q" [--folder X] [--limit N]  |  notes_list [--folder X]  |  notes_list_folders
         notes_get_content "Title" [--folder X]  |  notes_create "Title" "Body" [--folder X]
         notes_append "Title" "Text" [--folder X]
+PAGES:  pages_create "/abs/path/file.pages" "Title" "Body" [--overwrite true|false]
+        pages_append "/abs/path/file.pages" "Text"
+        pages_from_markdown "<input.md|->" ["/abs/path/output.pages"] [--theme auto|neutral|minimal|corporate|legal|proposal] [--style auto|neutral] [--title-page auto|off] [--toc auto|off] [--citations auto|off] [--images auto|off] [--image-max-width N] [--page-break-marker TEXT] [--qa true|false] [--export none|pdf|docx|pdf,docx] [--overwrite true|false]
+        pages_update_sections "<base.md|->" "<updates.md>" "<output.pages>" [--sections "A,B"] [same render flags]
+        pages_template "<research|contract|proposal>" ["/abs/path/template.md"]
+NUMBERS: numbers_create "/abs/path/file.numbers" '["H1","H2"]' [--sheet X] [--table X] [--overwrite true|false]
+         numbers_create_workbook "/abs/path/file.numbers" '{"sheets":[{"sheet_name":"Transactions","table_name":"Tx","headers":["Date","Item","Amount"],"rows":[["2026-03-04","Coffee",15]]}]}' [--overwrite true|false]
+         numbers_add_sheet "/abs/path/file.numbers" '{"sheet_name":"Summary","table_name":"Summary","headers":["Metric","Value"],"rows":[["Total",45]]}'
+         numbers_append_rows "/abs/path/file.numbers" '[["a",1],["b",2]]' [--sheet X] [--table X] [--position after-headers|after-data|at-end]
+         numbers_style_apply "/abs/path/file.numbers" '{"scope":"range","start_row":2,"end_row":10,"start_column":1,"end_column":5}' '{"background_color":[255,245,230],"font_size":12,"alignment":"center"}' [--sheet X] [--table X]
 MAIL:   mail_list_unread [--limit N]  |  mail_search "q" [--days N]  |  mail_get_content "id"
         mail_send "to@x.com" "Subject" "Body"  |  mail_list_mailboxes [--account X] [--include-system true|false]
         mail_move_to_label --message-id <id> [--message-id <id> ...] --label <name> [--account X] [--mailbox X]
@@ -46,8 +87,9 @@ MESSAGES:  messages_list_recent_chats [--limit N]  |  messages_search "q" [--lim
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def _run_script(script: str, timeout: float = 30.0) -> str | None:
-    """Run an osascript -e command. Returns stdout string or None on any failure."""
+def _probe_applescript_target(target: str, timeout: float = 5.0) -> bool:
+    """Best-effort probe for whether a document-based app is scriptable."""
+    script = f"tell {target} to count of documents"
     try:
         result = subprocess.run(
             ["osascript", "-e", script],
@@ -55,19 +97,125 @@ def _run_script(script: str, timeout: float = 30.0) -> str | None:
             text=True,
             timeout=timeout,
         )
-        if result.returncode != 0:
-            logger.warning("AppleScript failed (rc=%s): %s", result.returncode, result.stderr.strip())
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _resolve_applescript_target_candidates(
+    candidates: tuple[str, ...],
+    *,
+    fallback: str,
+    app_label: str,
+) -> str:
+    for candidate in candidates:
+        if _probe_applescript_target(candidate):
+            return candidate
+    logger.warning(
+        "Unable to verify AppleScript target for %s from candidates; falling back to %s",
+        app_label,
+        fallback,
+    )
+    return fallback
+
+
+def _resolve_applescript_app(
+    bundle_ids: tuple[str, ...],
+    fallback_name: str,
+    *,
+    allow_name_fallback: bool = True,
+) -> str:
+    candidates = [f'application id "{bundle_id}"' for bundle_id in bundle_ids]
+    for candidate in candidates:
+        if _probe_applescript_target(candidate):
+            return candidate
+    if allow_name_fallback:
+        name_candidate = f'application "{fallback_name}"'
+        if _probe_applescript_target(name_candidate):
+            return name_candidate
+    logger.warning(
+        "Unable to verify AppleScript target for %s via bundle id(s); falling back to %s",
+        fallback_name,
+        candidates[0],
+    )
+    return candidates[0]
+
+
+def _pages_app_target() -> str:
+    return _resolve_applescript_target_candidates(
+        PAGES_APP_TARGETS,
+        fallback=PAGES_APP_TARGETS[0],
+        app_label="Pages",
+    )
+
+
+def _warm_pages_app() -> bool:
+    """Best-effort launcher so Pages AppleScript calls do not fail on cold start."""
+    for target in PAGES_OPEN_TARGETS:
+        try:
+            result = subprocess.run(
+                ["open", "-a", target],
+                capture_output=True,
+                text=True,
+                timeout=10.0,
+            )
+            if result.returncode == 0:
+                # Give LaunchServices a short window before AppleScript queries.
+                time.sleep(1.0)
+                return True
+        except Exception:
+            continue
+    logger.warning("Unable to warm Pages app via known launch targets")
+    return False
+
+
+def _numbers_app_target() -> str:
+    # Support classic iWork bundle IDs and Creator Studio installs where
+    # bundle-id resolution can be flaky but path/name scripting still works.
+    return _resolve_applescript_target_candidates(
+        NUMBERS_APP_TARGETS,
+        fallback=NUMBERS_APP_TARGETS[0],
+        app_label="Numbers",
+    )
+
+
+def _run_script(script: str, timeout: float = 30.0) -> str | None:
+    """Run an osascript -e command. Returns stdout string or None on any failure."""
+    transient_markers = (
+        "Connection Invalid error for service com.apple.hiservices-xpcservice",
+        "Error received in message reply handler: Connection invalid",
+        "Expected class name but found identifier. (-2741)",
+    )
+    max_attempts = 8
+    for attempt in range(1, max_attempts + 1):
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip("\r\n")
+
+            stderr = (result.stderr or "").strip()
+            is_transient = any(marker in stderr for marker in transient_markers)
+            if is_transient and attempt < max_attempts:
+                time.sleep(0.5 * attempt)
+                continue
+
+            logger.warning("AppleScript failed (rc=%s): %s", result.returncode, stderr)
             return None
-        return result.stdout.strip("\r\n")
-    except subprocess.TimeoutExpired:
-        logger.warning("AppleScript timed out after %.1fs", timeout)
-        return None
-    except FileNotFoundError:
-        logger.warning("osascript not found — apple_tools requires macOS")
-        return None
-    except Exception as exc:
-        logger.warning("Unexpected error running AppleScript: %s", exc)
-        return None
+        except subprocess.TimeoutExpired:
+            logger.warning("AppleScript timed out after %.1fs", timeout)
+            return None
+        except FileNotFoundError:
+            logger.warning("osascript not found — apple_tools requires macOS")
+            return None
+        except Exception as exc:
+            logger.warning("Unexpected error running AppleScript: %s", exc)
+            return None
+    return None
 
 
 def _parse_json_output(raw: str | None) -> list[dict]:
@@ -391,6 +539,2347 @@ def notes_append(note_name_or_id: str, text: str, folder: str = "") -> bool:
         return True
     logger.warning("notes_append failed: %s", result)
     return False
+
+
+# ---------------------------------------------------------------------------
+# Apple Pages
+# ---------------------------------------------------------------------------
+
+def pages_create(
+    file_path: str,
+    title: str,
+    body: str,
+    overwrite: bool = False,
+) -> str | None:
+    """Create a Pages document at an absolute path. Returns path on success."""
+    path = Path(file_path).expanduser()
+    if not path.is_absolute():
+        logger.warning("pages_create requires an absolute path: %s", file_path)
+        return None
+    if path.suffix.lower() != ".pages":
+        logger.warning("pages_create requires a .pages path: %s", file_path)
+        return None
+    if path.exists() and not overwrite:
+        logger.warning("pages_create target exists and overwrite=false: %s", file_path)
+        return None
+
+    def _esc(s: str) -> str:
+        return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+    esc_path = _esc(str(path))
+    esc_text = _esc(f"{title}\n\n{body}" if body else title)
+    _warm_pages_app()
+    pages_app = _pages_app_target()
+
+    script = f'''
+    tell {pages_app}
+        try
+            activate
+            set newDoc to make new document
+            set body text of newDoc to "{esc_text}"
+            save newDoc in POSIX file "{esc_path}"
+            close newDoc saving yes
+            return "{esc_path}"
+        on error errMsg
+            return "error: " & errMsg
+        end try
+    end tell
+    '''
+    result = _run_script(script, timeout=45.0)
+    if not result or result.startswith("error:"):
+        logger.warning("pages_create failed: %s", result)
+        return None
+    return result
+
+
+def pages_append(
+    file_path: str,
+    text: str,
+    include_timestamp_header: bool = True,
+) -> bool:
+    """Append text to an existing Pages document."""
+    path = Path(file_path).expanduser()
+    if not path.is_absolute():
+        logger.warning("pages_append requires an absolute path: %s", file_path)
+        return False
+    if path.suffix.lower() != ".pages":
+        logger.warning("pages_append requires a .pages path: %s", file_path)
+        return False
+    if not path.exists():
+        logger.warning("pages_append target does not exist: %s", file_path)
+        return False
+
+    def _esc(s: str) -> str:
+        return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+    timestamp = datetime.now(UTC).isoformat(timespec="seconds")
+    payload = text
+    if include_timestamp_header:
+        payload = f"--- Apple Flow Entry {timestamp} ---\n{payload}"
+    esc_path = _esc(str(path))
+    esc_payload = _esc(payload)
+    _warm_pages_app()
+    pages_app = _pages_app_target()
+
+    script = f'''
+    tell {pages_app}
+        try
+            activate
+            open POSIX file "{esc_path}"
+            delay 1
+            set targetDoc to front document
+            set body text of targetDoc to (body text of targetDoc as text) & "\\n\\n" & "{esc_payload}"
+            save targetDoc
+            close targetDoc saving yes
+            return "ok"
+        on error errMsg
+            return "error: " & errMsg
+        end try
+    end tell
+    '''
+    result = _run_script(script, timeout=45.0)
+    if result == "ok":
+        return True
+    logger.warning("pages_append failed: %s", result)
+    return False
+
+
+def _normalize_heading_key(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def _strip_markdown_markup(text: str) -> str:
+    plain = re.sub(r"`([^`]+)`", r"\1", text)
+    plain = re.sub(r"\*\*(.+?)\*\*", r"\1", plain)
+    plain = re.sub(r"__(.+?)__", r"\1", plain)
+    plain = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\1", plain)
+    plain = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"\1", plain)
+    plain = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", plain)
+    return re.sub(r"\s+", " ", plain).strip()
+
+
+def _slugify_heading(text: str, seen: dict[str, int]) -> str:
+    base = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "section"
+    count = seen.get(base, 0) + 1
+    seen[base] = count
+    return base if count == 1 else f"{base}-{count}"
+
+
+def _extract_frontmatter(markdown_text: str) -> tuple[dict[str, str], str]:
+    lines = markdown_text.splitlines()
+    if len(lines) < 3 or lines[0].strip() != "---":
+        return {}, markdown_text
+
+    closing_idx = None
+    for idx in range(1, min(len(lines), 80)):
+        if lines[idx].strip() == "---":
+            closing_idx = idx
+            break
+    if closing_idx is None:
+        return {}, markdown_text
+
+    metadata: dict[str, str] = {}
+    for line in lines[1:closing_idx]:
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        normalized_key = key.strip().lower()
+        normalized_value = value.strip().strip('"').strip("'")
+        if normalized_key and normalized_value:
+            metadata[normalized_key] = normalized_value
+
+    if not metadata:
+        return {}, markdown_text
+
+    body = "\n".join(lines[closing_idx + 1 :])
+    return metadata, body
+
+
+def _extract_markdown_links(markdown_text: str) -> list[dict[str, str]]:
+    pattern = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)]+)\)")
+    seen: set[tuple[str, str]] = set()
+    links: list[dict[str, str]] = []
+
+    for label, raw_target in pattern.findall(markdown_text):
+        target = raw_target.strip().split(" ", 1)[0].strip("<>")
+        clean_label = _strip_markdown_markup(label)
+        if not target:
+            continue
+        key = (clean_label.lower(), target.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        links.append({"label": clean_label or target, "url": target})
+    return links
+
+
+def _apply_inline_markdown_markup(escaped_text: str) -> str:
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', escaped_text)
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
+    text = re.sub(r"__(.+?)__", r"<strong>\1</strong>", text)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<em>\1</em>", text)
+    text = re.sub(r"(?<!_)_(?!_)(.+?)(?<!_)_(?!_)", r"<em>\1</em>", text)
+    return text
+
+
+def _resolve_markdown_image_source(raw_source: str, source_dir: Path | None) -> tuple[str | None, str | None]:
+    source = raw_source.strip()
+    if not source:
+        return None, "encountered an empty markdown image source"
+
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", source):
+        return source, None
+
+    candidate = Path(source).expanduser()
+    if not candidate.is_absolute():
+        base = source_dir or Path.cwd()
+        candidate = (base / candidate).resolve()
+
+    if not candidate.exists():
+        return None, f"image path does not exist and was skipped: {candidate}"
+    if not candidate.is_file():
+        return None, f"image path is not a file and was skipped: {candidate}"
+    return candidate.as_uri(), None
+
+
+def _inline_markdown_to_html(
+    text: str,
+    *,
+    include_images: bool = False,
+    source_dir: Path | None = None,
+    image_max_width: int = 640,
+    warnings: list[str] | None = None,
+    image_stats: dict[str, int] | None = None,
+) -> str:
+    image_pattern = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+    out: list[str] = []
+    cursor = 0
+
+    for match in image_pattern.finditer(text):
+        before = text[cursor : match.start()]
+        if before:
+            out.append(_apply_inline_markdown_markup(html.escape(before)))
+
+        alt = match.group(1).strip()
+        raw_source = match.group(2).strip()
+        if image_stats is not None:
+            image_stats["references"] = image_stats.get("references", 0) + 1
+
+        if include_images:
+            resolved_source, warning = _resolve_markdown_image_source(raw_source, source_dir)
+            if resolved_source:
+                safe_alt = html.escape(alt or "image")
+                safe_src = html.escape(resolved_source, quote=True)
+                width = max(120, image_max_width)
+                out.append(
+                    '<img src="'
+                    + safe_src
+                    + '" alt="'
+                    + safe_alt
+                    + '" style="max-width:'
+                    + str(width)
+                    + 'px;width:100%;height:auto;" />'
+                )
+                if image_stats is not None:
+                    image_stats["embedded"] = image_stats.get("embedded", 0) + 1
+            else:
+                if warning and warnings is not None:
+                    warnings.append(warning)
+                fallback = alt or raw_source
+                out.append(f"<em>[Image unavailable: {html.escape(fallback)}]</em>")
+                if image_stats is not None:
+                    image_stats["missing"] = image_stats.get("missing", 0) + 1
+        else:
+            fallback = alt or raw_source
+            out.append(f"<em>[Image: {html.escape(fallback)}]</em>")
+            if image_stats is not None:
+                image_stats["disabled"] = image_stats.get("disabled", 0) + 1
+
+        cursor = match.end()
+
+    tail = text[cursor:]
+    if tail:
+        out.append(_apply_inline_markdown_markup(html.escape(tail)))
+    return "".join(out)
+
+
+def _split_markdown_table_row(line: str) -> list[str]:
+    row = line.strip()
+    if row.startswith("|"):
+        row = row[1:]
+    if row.endswith("|"):
+        row = row[:-1]
+    return [cell.strip() for cell in row.split("|")]
+
+
+def _is_markdown_table_separator(line: str) -> bool:
+    cells = _split_markdown_table_row(line)
+    if not cells:
+        return False
+    return all(bool(re.fullmatch(r":?-{3,}:?", cell.replace(" ", ""))) for cell in cells)
+
+
+def _is_ordered_item(line: str) -> bool:
+    return bool(re.match(r"^\d+[.)]\s+.+$", line.strip()))
+
+
+def _is_unordered_item(line: str) -> bool:
+    return bool(re.match(r"^[-*+]\s+.+$", line.strip()))
+
+
+def _is_heading(line: str) -> bool:
+    return bool(re.match(r"^#{1,6}\s+.+$", line.strip()))
+
+
+def _is_special_block_start(lines: list[str], idx: int, *, page_break_marker: str) -> bool:
+    line = lines[idx]
+    stripped = line.strip()
+    if not stripped:
+        return True
+    if page_break_marker and stripped == page_break_marker.strip():
+        return True
+    if stripped.startswith("```"):
+        return True
+    if stripped in {"---", "***", "___"}:
+        return True
+    if _is_heading(line):
+        return True
+    if _is_unordered_item(line) or _is_ordered_item(line):
+        return True
+    if "|" in line and idx + 1 < len(lines) and _is_markdown_table_separator(lines[idx + 1]):
+        return True
+    return False
+
+
+def _pages_theme_css(theme: str) -> str:
+    base_css = """
+    body { font-family: 'Avenir Next', 'Helvetica Neue', sans-serif; line-height: 1.5; font-size: 12pt; }
+    h1 { margin: 0 0 14pt 0; font-size: 28pt; letter-spacing: -0.02em; }
+    h2 { margin: 16pt 0 8pt 0; font-size: 18pt; }
+    h3 { margin: 12pt 0 6pt 0; font-size: 14pt; }
+    p { margin: 0 0 9pt 0; }
+    ul, ol { margin: 0 0 10pt 20pt; }
+    li { margin: 0 0 4pt 0; }
+    pre { border: 1px solid #e5e7eb; padding: 10pt; border-radius: 8pt; font-family: Menlo, Consolas, monospace; font-size: 10.5pt; }
+    code { font-family: Menlo, Consolas, monospace; padding: 1pt 3pt; border-radius: 3pt; }
+    table { border-collapse: collapse; width: 100%; margin: 12pt 0; }
+    th, td { border: 1px solid #d1d5db; padding: 7pt 9pt; text-align: left; vertical-align: top; }
+    th { font-weight: 700; }
+    hr { border: none; border-top: 1px solid #d1d5db; margin: 14pt 0; }
+    a { text-decoration: underline; }
+    .title-page { text-align: center; margin: 20vh 0 12vh 0; }
+    .title-page h1 { font-size: 34pt; margin-bottom: 12pt; }
+    .title-page .subtitle { font-size: 14pt; margin-bottom: 12pt; }
+    .title-page .meta { font-size: 10.5pt; margin: 4pt 0; }
+    .toc { margin: 8pt 0 16pt 0; padding: 10pt 12pt; border-radius: 8pt; }
+    .toc h2 { margin-top: 0; }
+    .toc ol { margin-bottom: 0; }
+    .toc li { margin-bottom: 3pt; }
+    .sources { margin-top: 16pt; }
+    .source-url { font-size: 9.5pt; }
+    img { display: block; margin: 8pt 0; }
+    """
+    theme_css = {
+        "neutral": """
+        body { color: #202124; }
+        h1, h2, h3 { color: #202124; }
+        pre, code { background: #f5f5f5; }
+        th { background: #f4f4f4; }
+        .toc { background: #f7f7f7; border: 1px solid #dedede; }
+        a { color: #1f4b99; }
+        """,
+        "minimal": """
+        body { color: #111827; font-family: 'Charter', 'Times New Roman', serif; line-height: 1.6; }
+        h1, h2, h3 { color: #111827; font-family: 'Avenir Next', 'Helvetica Neue', sans-serif; }
+        pre, code { background: #f8f8f8; border-color: #ececec; }
+        th { background: #fafafa; }
+        .toc { background: #fbfbfb; border: 1px solid #ececec; }
+        a { color: #1d4ed8; }
+        """,
+        "corporate": """
+        body { color: #1f2937; }
+        h1, h2, h3 { color: #111827; }
+        pre, code { background: #f3f4f6; }
+        th { background: #eef2ff; color: #111827; }
+        .toc { background: #eef2ff; border: 1px solid #c7d2fe; }
+        a { color: #1d4ed8; }
+        """,
+        "legal": """
+        body { color: #1b1b1b; font-family: 'Times New Roman', Georgia, serif; line-height: 1.55; }
+        h1, h2, h3 { color: #111111; font-family: 'Times New Roman', Georgia, serif; letter-spacing: 0; }
+        pre, code { background: #f8f8f8; border-color: #e5e5e5; }
+        th { background: #f4f4f4; color: #111111; }
+        .toc { background: #f8f8f8; border: 1px solid #dddddd; }
+        a { color: #0f2f6b; }
+        """,
+        "proposal": """
+        body { color: #1f2937; }
+        h1 { color: #0f172a; font-size: 32pt; }
+        h2 { color: #1e3a8a; }
+        pre, code { background: #f8fafc; border-color: #e2e8f0; }
+        th { background: #dbeafe; color: #0f172a; }
+        .toc { background: #eff6ff; border: 1px solid #bfdbfe; }
+        a { color: #1d4ed8; }
+        """,
+        "auto": """
+        body { color: #1f2937; }
+        h1, h2, h3 { color: #111827; }
+        pre, code { background: #f3f4f6; }
+        th { background: #eef2ff; color: #111827; }
+        .toc { background: #f3f4f6; border: 1px solid #d1d5db; }
+        a { color: #1d4ed8; }
+        """,
+    }
+    return base_css + theme_css.get(theme, theme_css["auto"])
+
+
+def _normalize_style(style: str, warnings: list[str]) -> str:
+    normalized = style.strip().lower() if style else "auto"
+    if normalized not in {"auto", "neutral"}:
+        warnings.append(f"unsupported style '{style}' requested; defaulted to 'auto'")
+        return "auto"
+    return normalized
+
+
+def _normalize_theme(theme: str, style: str, warnings: list[str]) -> str:
+    requested = theme.strip().lower() if theme else "auto"
+    legacy_theme = "neutral" if style == "neutral" else "auto"
+
+    if requested == "auto":
+        return legacy_theme
+    if requested not in PAGES_THEME_PRESETS:
+        warnings.append(f"unsupported theme '{theme}' requested; defaulted to '{legacy_theme}'")
+        return legacy_theme
+    if style == "neutral" and requested != "neutral":
+        warnings.append("style='neutral' was overridden by explicit --theme")
+    return requested
+
+
+def _normalize_toggle(
+    value: str,
+    *,
+    option_name: str,
+    auto_default: bool,
+    warnings: list[str],
+) -> bool:
+    normalized = (value or "auto").strip().lower()
+    truthy = {"true", "yes", "y", "1", "on"}
+    falsy = {"false", "no", "n", "0", "off"}
+    if normalized == "auto":
+        return auto_default
+    if normalized in truthy:
+        return True
+    if normalized in falsy:
+        return False
+    warnings.append(f"unsupported value '{value}' for {option_name}; using auto")
+    return auto_default
+
+
+def _normalize_export_targets(export: str, warnings: list[str]) -> list[str]:
+    value = (export or "none").strip().lower()
+    if not value or value == "none":
+        return []
+
+    targets: list[str] = []
+    for token in value.split(","):
+        item = token.strip().lower()
+        if not item:
+            continue
+        if item not in PAGES_EXPORT_PRESETS:
+            warnings.append(f"unsupported export target '{item}' ignored")
+            continue
+        if item != "none" and item not in targets:
+            targets.append(item)
+    return targets
+
+
+def _build_title_page_html(metadata: dict[str, str], fallback_title: str) -> str:
+    title = metadata.get("title") or fallback_title or "Untitled Document"
+    subtitle = metadata.get("subtitle", "")
+    author = metadata.get("author", "")
+    date = metadata.get("date", "")
+    client = metadata.get("client", "")
+
+    parts = [
+        '<section class="title-page">',
+        f"<h1>{html.escape(title)}</h1>",
+    ]
+    if subtitle:
+        parts.append(f'<p class="subtitle">{html.escape(subtitle)}</p>')
+    if author:
+        parts.append(f'<p class="meta"><strong>Author:</strong> {html.escape(author)}</p>')
+    if client:
+        parts.append(f'<p class="meta"><strong>Client:</strong> {html.escape(client)}</p>')
+    if date:
+        parts.append(f'<p class="meta"><strong>Date:</strong> {html.escape(date)}</p>')
+    parts.append("</section>")
+    parts.append(f"<p>{PAGES_PAGEBREAK_TOKEN}</p>")
+    return "".join(parts)
+
+
+def _build_toc_html(headings: list[dict[str, Any]]) -> str:
+    if not headings:
+        return ""
+    lines = ['<section class="toc"><h2>Table of Contents</h2><ol>']
+    for heading in headings:
+        heading_id = html.escape(str(heading["id"]), quote=True)
+        text = html.escape(str(heading["text"]))
+        lines.append(f'<li><a href="#{heading_id}">{text}</a></li>')
+    lines.append("</ol></section>")
+    return "".join(lines)
+
+
+def _build_sources_html(citation_links: list[dict[str, str]]) -> str:
+    if not citation_links:
+        return ""
+    lines = ['<section class="sources"><h2>Sources</h2><ol>']
+    for item in citation_links:
+        label = html.escape(item.get("label", "") or item.get("url", ""))
+        url = html.escape(item.get("url", ""), quote=True)
+        lines.append(f'<li><a href="{url}">{label}</a><div class="source-url">{url}</div></li>')
+    lines.append("</ol></section>")
+    return "".join(lines)
+
+
+def _markdown_to_html_document(
+    markdown_text: str,
+    *,
+    theme: str,
+    include_title_page: bool,
+    include_toc: bool,
+    include_citations: bool,
+    citation_links: list[dict[str, str]],
+    include_images: bool,
+    image_max_width: int,
+    page_break_marker: str,
+    source_dir: Path | None,
+    metadata: dict[str, str],
+    warnings: list[str],
+) -> tuple[str, dict[str, int], list[dict[str, Any]]]:
+    lines = markdown_text.splitlines()
+    i = 0
+    body_parts: list[str] = []
+    heading_entries: list[dict[str, Any]] = []
+    heading_slug_counts: dict[str, int] = {}
+    image_stats: dict[str, int] = {"references": 0, "embedded": 0, "missing": 0, "disabled": 0}
+    page_break_marker = (page_break_marker or "").strip()
+
+    stats = {
+        "headings": 0,
+        "paragraphs": 0,
+        "unordered_lists": 0,
+        "ordered_lists": 0,
+        "table_count": 0,
+        "code_blocks": 0,
+        "images": 0,
+        "page_breaks": 0,
+    }
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        if not stripped:
+            i += 1
+            continue
+
+        if page_break_marker and stripped == page_break_marker:
+            body_parts.append(f"<p>{PAGES_PAGEBREAK_TOKEN}</p>")
+            stats["page_breaks"] += 1
+            i += 1
+            continue
+
+        if stripped.startswith("```"):
+            code_lines: list[str] = []
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith("```"):
+                code_lines.append(lines[i])
+                i += 1
+            if i < len(lines) and lines[i].strip().startswith("```"):
+                i += 1
+            body_parts.append(f"<pre><code>{html.escape(chr(10).join(code_lines))}</code></pre>")
+            stats["code_blocks"] += 1
+            continue
+
+        if stripped in {"---", "***", "___"}:
+            body_parts.append("<hr>")
+            i += 1
+            continue
+
+        if _is_heading(line):
+            heading_match = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+            assert heading_match is not None
+            depth = min(len(heading_match.group(1)), 3)
+            raw_heading = heading_match.group(2)
+            plain_heading = _strip_markdown_markup(raw_heading) or raw_heading.strip()
+            heading_id = _slugify_heading(plain_heading, heading_slug_counts)
+            content = _inline_markdown_to_html(
+                raw_heading,
+                include_images=include_images,
+                source_dir=source_dir,
+                image_max_width=image_max_width,
+                warnings=warnings,
+                image_stats=image_stats,
+            )
+            body_parts.append(f'<h{depth} id="{heading_id}">{content}</h{depth}>')
+            heading_entries.append({"id": heading_id, "text": plain_heading, "depth": depth})
+            stats["headings"] += 1
+            i += 1
+            continue
+
+        if "|" in line and i + 1 < len(lines) and _is_markdown_table_separator(lines[i + 1]):
+            header = _split_markdown_table_row(lines[i])
+            i += 2
+            body_rows: list[list[str]] = []
+            while i < len(lines):
+                candidate = lines[i]
+                candidate_stripped = candidate.strip()
+                if not candidate_stripped or "|" not in candidate:
+                    break
+                if _is_markdown_table_separator(candidate):
+                    i += 1
+                    continue
+                body_rows.append(_split_markdown_table_row(candidate))
+                i += 1
+
+            col_count = max(len(header), max((len(row) for row in body_rows), default=0))
+            if col_count == 0:
+                continue
+
+            padded_header = header + [""] * (col_count - len(header))
+            body_parts.append("<table><thead><tr>")
+            for cell in padded_header:
+                body_parts.append(
+                    "<th>"
+                    + _inline_markdown_to_html(
+                        cell,
+                        include_images=include_images,
+                        source_dir=source_dir,
+                        image_max_width=image_max_width,
+                        warnings=warnings,
+                        image_stats=image_stats,
+                    )
+                    + "</th>"
+                )
+            body_parts.append("</tr></thead><tbody>")
+            for row in body_rows:
+                padded_row = row + [""] * (col_count - len(row))
+                body_parts.append("<tr>")
+                for cell in padded_row:
+                    body_parts.append(
+                        "<td>"
+                        + _inline_markdown_to_html(
+                            cell,
+                            include_images=include_images,
+                            source_dir=source_dir,
+                            image_max_width=image_max_width,
+                            warnings=warnings,
+                            image_stats=image_stats,
+                        )
+                        + "</td>"
+                    )
+                body_parts.append("</tr>")
+            body_parts.append("</tbody></table>")
+            stats["table_count"] += 1
+            continue
+
+        if _is_unordered_item(line):
+            items: list[str] = []
+            while i < len(lines) and _is_unordered_item(lines[i]):
+                item = re.sub(r"^[-*+]\s+", "", lines[i].strip(), count=1)
+                items.append(
+                    _inline_markdown_to_html(
+                        item,
+                        include_images=include_images,
+                        source_dir=source_dir,
+                        image_max_width=image_max_width,
+                        warnings=warnings,
+                        image_stats=image_stats,
+                    )
+                )
+                i += 1
+            body_parts.append("<ul>")
+            for item in items:
+                body_parts.append(f"<li>{item}</li>")
+            body_parts.append("</ul>")
+            stats["unordered_lists"] += 1
+            continue
+
+        if _is_ordered_item(line):
+            items = []
+            while i < len(lines) and _is_ordered_item(lines[i]):
+                item = re.sub(r"^\d+[.)]\s+", "", lines[i].strip(), count=1)
+                items.append(
+                    _inline_markdown_to_html(
+                        item,
+                        include_images=include_images,
+                        source_dir=source_dir,
+                        image_max_width=image_max_width,
+                        warnings=warnings,
+                        image_stats=image_stats,
+                    )
+                )
+                i += 1
+            body_parts.append("<ol>")
+            for item in items:
+                body_parts.append(f"<li>{item}</li>")
+            body_parts.append("</ol>")
+            stats["ordered_lists"] += 1
+            continue
+
+        paragraph_lines = [stripped]
+        i += 1
+        while i < len(lines) and not _is_special_block_start(lines, i, page_break_marker=page_break_marker):
+            next_line = lines[i].strip()
+            if next_line:
+                paragraph_lines.append(next_line)
+            i += 1
+        paragraph = " ".join(paragraph_lines).strip()
+        if paragraph:
+            body_parts.append(
+                "<p>"
+                + _inline_markdown_to_html(
+                    paragraph,
+                    include_images=include_images,
+                    source_dir=source_dir,
+                    image_max_width=image_max_width,
+                    warnings=warnings,
+                    image_stats=image_stats,
+                )
+                + "</p>"
+            )
+            stats["paragraphs"] += 1
+
+    stats["images"] = image_stats.get("embedded", 0)
+    if image_stats.get("missing", 0):
+        stats["images_missing"] = image_stats["missing"]  # type: ignore[index]
+    if image_stats.get("disabled", 0):
+        stats["images_disabled"] = image_stats["disabled"]  # type: ignore[index]
+
+    preface_parts: list[str] = []
+    fallback_title = heading_entries[0]["text"] if heading_entries else ""
+    if include_title_page:
+        preface_parts.append(_build_title_page_html(metadata, fallback_title))
+    if include_toc and heading_entries:
+        preface_parts.append(_build_toc_html(heading_entries))
+    if include_toc and heading_entries and not include_title_page:
+        preface_parts.append(f"<p>{PAGES_PAGEBREAK_TOKEN}</p>")
+        stats["page_breaks"] += 1
+
+    appendix_parts: list[str] = []
+    if include_citations and citation_links:
+        appendix_parts.append(_build_sources_html(citation_links))
+
+    css = _pages_theme_css(theme)
+    doc = (
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        f"<style>{css}</style>"
+        "</head><body>"
+        + "".join(preface_parts)
+        + "".join(body_parts)
+        + "".join(appendix_parts)
+        + "</body></html>"
+    )
+    return doc, stats, heading_entries
+
+
+def _inject_rtf_page_breaks(rtf_file: Path) -> int:
+    try:
+        payload = rtf_file.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return 0
+    replacements = payload.count(PAGES_PAGEBREAK_TOKEN)
+    if replacements <= 0:
+        return 0
+    updated = payload.replace(PAGES_PAGEBREAK_TOKEN, r"\page ")
+    try:
+        rtf_file.write_text(updated, encoding="utf-8")
+    except OSError:
+        return 0
+    return replacements
+
+
+def _pages_export_document(
+    pages_path: Path,
+    targets: list[str],
+    pages_app: str,
+    warnings: list[str],
+) -> dict[str, str]:
+    if not targets:
+        return {}
+
+    def _esc(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
+    exports: dict[str, str] = {}
+    esc_input = _esc(str(pages_path))
+    for target in targets:
+        suffix = ".pdf" if target == "pdf" else ".docx"
+        export_kind = "PDF" if target == "pdf" else "Microsoft Word"
+        export_path = pages_path.with_suffix(suffix)
+        esc_output = _esc(str(export_path))
+        script = f'''
+        tell {pages_app}
+            try
+                activate
+                set targetDoc to open POSIX file "{esc_input}"
+                delay 1
+                export targetDoc to POSIX file "{esc_output}" as {export_kind}
+                close targetDoc saving no
+                return "ok"
+            on error errMsg
+                try
+                    if (count of documents) > 0 then close front document saving no
+                end try
+                return "error: " & errMsg
+            end try
+        end tell
+        '''
+        result = _run_script(script, timeout=90.0)
+        if result == "ok":
+            exports[target] = str(export_path)
+        else:
+            warnings.append(f"failed to export {target}: {result or 'unknown error'}")
+    return exports
+
+
+def _render_pages_markdown(
+    markdown_text: str,
+    *,
+    source_label: str,
+    source_path: Path | None,
+    output_path: str,
+    style: str,
+    theme: str,
+    title_page: str,
+    toc: str,
+    citations: str,
+    images: str,
+    image_max_width: int,
+    page_break_marker: str,
+    qa: bool,
+    export: str,
+    overwrite: bool,
+) -> dict[str, Any]:
+    if not markdown_text.strip():
+        return {"ok": False, "error": "markdown input is empty"}
+
+    if output_path:
+        output = Path(output_path).expanduser()
+        if not output.is_absolute():
+            output = (Path.cwd() / output).resolve()
+    elif source_path is not None:
+        output = source_path.with_suffix(".pages")
+    else:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        output = (Path.cwd() / f"pages-report-{stamp}.pages").resolve()
+
+    if output.suffix.lower() != ".pages":
+        return {"ok": False, "error": "output must use .pages extension"}
+    if output.exists() and not overwrite:
+        return {"ok": False, "error": f"output exists and overwrite=false: {output}"}
+
+    warnings: list[str] = []
+    normalized_style = _normalize_style(style, warnings)
+    normalized_theme = _normalize_theme(theme, normalized_style, warnings)
+    marker = (page_break_marker or PAGES_DEFAULT_PAGE_BREAK_MARKER).strip()
+    if not marker:
+        marker = PAGES_DEFAULT_PAGE_BREAK_MARKER
+        warnings.append("empty page break marker requested; using default marker")
+    width = image_max_width
+    if width < 120:
+        warnings.append("image_max_width too small; clamped to 120")
+        width = 120
+
+    metadata, markdown_body = _extract_frontmatter(markdown_text)
+    citation_links = _extract_markdown_links(markdown_body)
+    has_images = bool(re.search(r"!\[[^\]]*\]\(([^)]+)\)", markdown_body))
+    heading_count = len(re.findall(r"^#{1,6}\s+.+$", markdown_body, flags=re.MULTILINE))
+
+    include_title_page = _normalize_toggle(
+        title_page,
+        option_name="title_page",
+        auto_default=bool(metadata.get("title") or metadata.get("subtitle")),
+        warnings=warnings,
+    )
+    include_toc = _normalize_toggle(
+        toc,
+        option_name="toc",
+        auto_default=heading_count >= 6,
+        warnings=warnings,
+    )
+    include_citations = _normalize_toggle(
+        citations,
+        option_name="citations",
+        auto_default=bool(citation_links),
+        warnings=warnings,
+    )
+    include_images = _normalize_toggle(
+        images,
+        option_name="images",
+        auto_default=has_images,
+        warnings=warnings,
+    )
+    export_targets = _normalize_export_targets(export, warnings)
+
+    source_dir = source_path.parent if source_path else Path.cwd()
+    html_doc, stats, headings = _markdown_to_html_document(
+        markdown_body,
+        theme=normalized_theme,
+        include_title_page=include_title_page,
+        include_toc=include_toc,
+        include_citations=include_citations,
+        citation_links=citation_links,
+        include_images=include_images,
+        image_max_width=width,
+        page_break_marker=marker,
+        source_dir=source_dir,
+        metadata=metadata,
+        warnings=warnings,
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    def _esc(value: str) -> str:
+        return value.replace("\\", "\\\\").replace('"', '\\"')
+
+    exports: dict[str, str] = {}
+    try:
+        with tempfile.TemporaryDirectory(prefix="appleflow-pages-") as tmp_dir:
+            stem = source_path.stem if source_path is not None else "stdin-report"
+            html_file = Path(tmp_dir) / f"{stem}.html"
+            rtf_file = Path(tmp_dir) / f"{stem}.rtf"
+            html_file.write_text(html_doc, encoding="utf-8")
+
+            textutil_result = subprocess.run(
+                [
+                    "textutil",
+                    "-convert",
+                    "rtf",
+                    "-format",
+                    "html",
+                    str(html_file),
+                    "-output",
+                    str(rtf_file),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30.0,
+            )
+            if textutil_result.returncode != 0:
+                detail = (textutil_result.stderr or "").strip() or "textutil conversion failed"
+                return {"ok": False, "error": detail}
+
+            if rtf_file.exists() and stats.get("page_breaks", 0) > 0:
+                applied = _inject_rtf_page_breaks(rtf_file)
+                if applied <= 0:
+                    warnings.append("page break markers were requested but could not be injected into RTF")
+                else:
+                    stats["page_breaks_applied"] = applied
+
+            _warm_pages_app()
+            pages_app = _pages_app_target()
+            esc_rtf = _esc(str(rtf_file))
+            esc_output = _esc(str(output))
+            script = f'''
+            tell {pages_app}
+                try
+                    activate
+                    open POSIX file "{esc_rtf}"
+                    delay 1
+                    set targetDoc to front document
+                    save targetDoc in POSIX file "{esc_output}"
+                    close targetDoc saving yes
+                    return "ok"
+                on error errMsg
+                    return "error: " & errMsg
+                end try
+            end tell
+            '''
+            result = _run_script(script, timeout=90.0)
+            if result != "ok":
+                return {"ok": False, "error": result or "Pages conversion failed"}
+
+            exports = _pages_export_document(output, export_targets, pages_app, warnings)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "conversion timed out"}
+    except FileNotFoundError as exc:
+        return {"ok": False, "error": f"required tool missing: {exc}"}
+    except OSError as exc:
+        return {"ok": False, "error": f"conversion error: {exc}"}
+
+    if not output.exists():
+        return {"ok": False, "error": "conversion completed but output file was not created"}
+
+    response: dict[str, Any] = {
+        "ok": True,
+        "input_path": source_label,
+        "output_path": str(output),
+        "style": normalized_style,
+        "theme": normalized_theme,
+        "warnings": warnings,
+        "stats": stats,
+        "options": {
+            "title_page": include_title_page,
+            "toc": include_toc,
+            "citations": include_citations,
+            "images": include_images,
+            "page_break_marker": marker,
+            "export_targets": export_targets,
+        },
+        "metadata": metadata,
+    }
+
+    if exports:
+        response["exports"] = exports
+
+    if qa:
+        word_count = len(re.findall(r"\b[\w'-]+\b", _strip_markdown_markup(markdown_body)))
+        estimated_pages = max(1, (word_count + 399) // 400)
+        response["qa_report"] = {
+            "word_count": word_count,
+            "estimated_pages": estimated_pages,
+            "heading_count": stats.get("headings", 0),
+            "citation_count": len(citation_links),
+            "warnings_count": len(warnings),
+            "toc_enabled": include_toc,
+            "title_page_enabled": include_title_page,
+            "has_images": stats.get("images", 0) > 0,
+            "generated_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+        }
+
+    response["sections"] = [heading["text"] for heading in headings]
+    return response
+
+
+def pages_from_markdown(
+    input_path: str,
+    output_path: str = "",
+    style: str = "auto",
+    overwrite: bool = False,
+    *,
+    theme: str = "auto",
+    title_page: str = "auto",
+    toc: str = "auto",
+    citations: str = "auto",
+    images: str = "auto",
+    image_max_width: int = 640,
+    page_break_marker: str = PAGES_DEFAULT_PAGE_BREAK_MARKER,
+    qa: bool = False,
+    export: str = "none",
+) -> dict[str, Any]:
+    """Convert markdown to a styled Pages document with deterministic rendering."""
+    from_stdin = input_path.strip() == "-"
+    source_path: Path | None = None
+    source_label = ""
+
+    if from_stdin:
+        markdown_text = sys.stdin.read()
+        if not markdown_text.strip():
+            return {"ok": False, "error": "stdin markdown input is empty"}
+        source_label = "<stdin>"
+    else:
+        source_path = Path(input_path).expanduser()
+        if not source_path.is_absolute():
+            source_path = (Path.cwd() / source_path).resolve()
+        if not source_path.exists():
+            return {"ok": False, "error": f"input file not found: {source_path}"}
+        if not source_path.is_file():
+            return {"ok": False, "error": f"input path is not a file: {source_path}"}
+        source_label = str(source_path)
+        try:
+            markdown_text = source_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return {"ok": False, "error": "input file must be UTF-8 text"}
+        except OSError as exc:
+            return {"ok": False, "error": f"failed to read input file: {exc}"}
+
+    return _render_pages_markdown(
+        markdown_text,
+        source_label=source_label,
+        source_path=source_path,
+        output_path=output_path,
+        style=style,
+        theme=theme,
+        title_page=title_page,
+        toc=toc,
+        citations=citations,
+        images=images,
+        image_max_width=image_max_width,
+        page_break_marker=page_break_marker,
+        qa=qa,
+        export=export,
+        overwrite=overwrite,
+    )
+
+
+def _split_markdown_sections(markdown_text: str) -> tuple[str, list[dict[str, str]]]:
+    lines = markdown_text.splitlines(keepends=True)
+    heading_re = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+    heading_indices = [idx for idx, line in enumerate(lines) if heading_re.match(line.strip("\r\n"))]
+
+    if not heading_indices:
+        preamble = "".join(lines)
+        return preamble, []
+
+    preamble = "".join(lines[: heading_indices[0]])
+    sections: list[dict[str, str]] = []
+    for i, start_idx in enumerate(heading_indices):
+        end_idx = heading_indices[i + 1] if i + 1 < len(heading_indices) else len(lines)
+        block = "".join(lines[start_idx:end_idx]).rstrip() + "\n"
+        heading_match = heading_re.match(lines[start_idx].strip("\r\n"))
+        assert heading_match is not None
+        title = _strip_markdown_markup(heading_match.group(2))
+        sections.append(
+            {
+                "key": _normalize_heading_key(title),
+                "title": title,
+                "block": block,
+            }
+        )
+    return preamble, sections
+
+
+def _merge_markdown_sections(
+    base_markdown: str,
+    updates_markdown: str,
+    requested_sections: list[str] | None,
+) -> tuple[str, dict[str, Any]]:
+    base_preamble, base_sections = _split_markdown_sections(base_markdown)
+    _, update_sections = _split_markdown_sections(updates_markdown)
+    merge_warnings: list[str] = []
+
+    update_lookup: dict[str, dict[str, str]] = {}
+    update_order: list[str] = []
+    for section in update_sections:
+        key = section["key"]
+        if key in update_lookup:
+            merge_warnings.append(f"duplicate section in updates ignored: {section['title']}")
+            continue
+        update_lookup[key] = section
+        update_order.append(key)
+
+    if requested_sections:
+        requested_lookup = {_normalize_heading_key(name): name for name in requested_sections if name.strip()}
+        selected_keys = [key for key in update_order if key in requested_lookup]
+        for key, original in requested_lookup.items():
+            if key not in update_lookup:
+                merge_warnings.append(f"requested section not found in updates: {original}")
+    else:
+        selected_keys = list(update_order)
+
+    selected_key_set = set(selected_keys)
+    applied_keys: list[str] = []
+    merged_blocks: list[str] = []
+
+    for section in base_sections:
+        key = section["key"]
+        if key in selected_key_set and key in update_lookup:
+            merged_blocks.append(update_lookup[key]["block"].rstrip())
+            applied_keys.append(key)
+        else:
+            merged_blocks.append(section["block"].rstrip())
+
+    appended_keys = [key for key in selected_keys if key not in applied_keys]
+    for key in appended_keys:
+        merged_blocks.append(update_lookup[key]["block"].rstrip())
+
+    if not base_sections and selected_keys:
+        merged_blocks = [update_lookup[key]["block"].rstrip() for key in selected_keys]
+
+    merged_parts: list[str] = []
+    if base_preamble.strip():
+        merged_parts.append(base_preamble.rstrip())
+    merged_parts.extend(block for block in merged_blocks if block.strip())
+    merged_markdown = "\n\n".join(merged_parts).strip()
+    if merged_markdown:
+        merged_markdown += "\n"
+
+    key_to_title = {section["key"]: section["title"] for section in update_sections}
+    return merged_markdown, {
+        "requested_sections": requested_sections or [],
+        "applied_sections": [key_to_title.get(key, key) for key in applied_keys],
+        "appended_sections": [key_to_title.get(key, key) for key in appended_keys],
+        "warnings": merge_warnings,
+    }
+
+
+def pages_update_sections(
+    base_input_path: str,
+    updates_path: str,
+    output_path: str,
+    *,
+    sections: list[str] | str | None = None,
+    style: str = "auto",
+    theme: str = "auto",
+    title_page: str = "auto",
+    toc: str = "auto",
+    citations: str = "auto",
+    images: str = "auto",
+    image_max_width: int = 640,
+    page_break_marker: str = PAGES_DEFAULT_PAGE_BREAK_MARKER,
+    qa: bool = False,
+    export: str = "none",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Merge selected markdown sections and render the result to a Pages document."""
+    if not output_path:
+        return {"ok": False, "error": "output path is required"}
+
+    base_from_stdin = base_input_path.strip() == "-"
+    if base_from_stdin:
+        base_markdown = sys.stdin.read()
+        if not base_markdown.strip():
+            return {"ok": False, "error": "stdin markdown input is empty"}
+        base_label = "<stdin>"
+    else:
+        base_source = Path(base_input_path).expanduser()
+        if not base_source.is_absolute():
+            base_source = (Path.cwd() / base_source).resolve()
+        if not base_source.exists():
+            return {"ok": False, "error": f"base file not found: {base_source}"}
+        if not base_source.is_file():
+            return {"ok": False, "error": f"base input path is not a file: {base_source}"}
+        try:
+            base_markdown = base_source.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return {"ok": False, "error": "base input file must be UTF-8 text"}
+        except OSError as exc:
+            return {"ok": False, "error": f"failed to read base input file: {exc}"}
+        base_label = str(base_source)
+
+    updates_source = Path(updates_path).expanduser()
+    if not updates_source.is_absolute():
+        updates_source = (Path.cwd() / updates_source).resolve()
+    if not updates_source.exists():
+        return {"ok": False, "error": f"updates file not found: {updates_source}"}
+    if not updates_source.is_file():
+        return {"ok": False, "error": f"updates path is not a file: {updates_source}"}
+    try:
+        updates_markdown = updates_source.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return {"ok": False, "error": "updates file must be UTF-8 text"}
+    except OSError as exc:
+        return {"ok": False, "error": f"failed to read updates file: {exc}"}
+
+    requested_sections: list[str] | None
+    if isinstance(sections, str):
+        requested_sections = [part.strip() for part in sections.split(",") if part.strip()] or None
+    elif sections:
+        requested_sections = [str(part).strip() for part in sections if str(part).strip()] or None
+    else:
+        requested_sections = None
+
+    merged_markdown, merge_info = _merge_markdown_sections(
+        base_markdown,
+        updates_markdown,
+        requested_sections=requested_sections,
+    )
+    if not merged_markdown.strip():
+        return {"ok": False, "error": "merged markdown is empty after applying updates"}
+
+    result = _render_pages_markdown(
+        merged_markdown,
+        source_label=f"{base_label} + {updates_source}",
+        source_path=updates_source,
+        output_path=output_path,
+        style=style,
+        theme=theme,
+        title_page=title_page,
+        toc=toc,
+        citations=citations,
+        images=images,
+        image_max_width=image_max_width,
+        page_break_marker=page_break_marker,
+        qa=qa,
+        export=export,
+        overwrite=overwrite,
+    )
+    if result.get("ok"):
+        result["merge"] = merge_info
+        if merge_info["warnings"]:
+            result.setdefault("warnings", []).extend(merge_info["warnings"])
+    return result
+
+
+def pages_template(
+    template_type: str,
+    output_path: str = "",
+    *,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Create a markdown starter template for Pages document generation."""
+    normalized = template_type.strip().lower()
+    templates = {
+        "research": """---
+title: Research Report
+subtitle: Topic Overview
+author: Your Name
+date: 2026-03-04
+---
+
+# Executive Summary
+
+Summarize the key findings in 3-5 bullets.
+
+## Background
+
+Describe the context and why this topic matters.
+
+## Findings
+
+1. Finding one
+2. Finding two
+3. Finding three
+
+<!-- pagebreak -->
+
+## Comparison Table
+
+| Option | Strengths | Risks |
+| --- | --- | --- |
+| A | ... | ... |
+| B | ... | ... |
+
+## Recommendations
+
+- Recommendation 1
+- Recommendation 2
+
+## Sources
+
+- [Example Source](https://example.com)
+""",
+        "contract": """---
+title: Service Agreement
+subtitle: Draft
+author: Your Company
+date: 2026-03-04
+client: Client Name
+---
+
+# Parties
+
+This agreement is between [Provider] and [Client].
+
+## Scope of Work
+
+Describe deliverables, milestones, and acceptance criteria.
+
+## Term and Termination
+
+Define start date, term length, and termination rights.
+
+## Fees and Payment
+
+State pricing, invoice schedule, and late terms.
+
+<!-- pagebreak -->
+
+## Confidentiality
+
+Define protected information and obligations.
+
+## Intellectual Property
+
+Define ownership of work product and licenses.
+
+## Liability and Dispute Resolution
+
+Define caps, exclusions, governing law, and venue.
+""",
+        "proposal": """---
+title: Project Proposal
+subtitle: Client Engagement
+author: Your Name
+date: 2026-03-04
+client: Client Name
+---
+
+# Objective
+
+State the business goal this proposal solves.
+
+## Current Situation
+
+Summarize the current workflow and constraints.
+
+## Proposed Solution
+
+Describe the recommended solution in clear phases.
+
+## Timeline
+
+| Phase | Duration | Output |
+| --- | --- | --- |
+| Discovery | 1 week | Scope + plan |
+| Build | 3 weeks | Working deliverable |
+| Launch | 1 week | Training + handoff |
+
+<!-- pagebreak -->
+
+## Budget
+
+- Line item 1
+- Line item 2
+
+## Next Steps
+
+1. Approve scope
+2. Confirm timeline
+3. Kickoff meeting
+""",
+    }
+
+    if normalized not in templates:
+        supported = ", ".join(sorted(templates.keys()))
+        return {"ok": False, "error": f"unsupported template type '{template_type}'. supported: {supported}"}
+
+    if output_path:
+        destination = Path(output_path).expanduser()
+        if not destination.is_absolute():
+            destination = (Path.cwd() / destination).resolve()
+    else:
+        destination = (Path.cwd() / f"{normalized}-template.md").resolve()
+
+    if destination.suffix.lower() != ".md":
+        return {"ok": False, "error": "template output must use .md extension"}
+    if destination.exists() and not overwrite:
+        return {"ok": False, "error": f"template output exists and overwrite=false: {destination}"}
+
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(templates[normalized], encoding="utf-8")
+    except OSError as exc:
+        return {"ok": False, "error": f"failed to write template: {exc}"}
+
+    return {
+        "ok": True,
+        "template_type": normalized,
+        "output_path": str(destination),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Apple Numbers
+# ---------------------------------------------------------------------------
+
+def numbers_create(
+    file_path: str,
+    headers: list[str],
+    sheet_name: str = "",
+    table_name: str = "",
+    overwrite: bool = False,
+) -> str | None:
+    """Create a Numbers document and initialize header row."""
+    path = Path(file_path).expanduser()
+    if not path.is_absolute():
+        logger.warning("numbers_create requires an absolute path: %s", file_path)
+        return None
+    if path.suffix.lower() != ".numbers":
+        logger.warning("numbers_create requires a .numbers path: %s", file_path)
+        return None
+    if path.exists() and not overwrite:
+        logger.warning("numbers_create target exists and overwrite=false: %s", file_path)
+        return None
+    if not headers:
+        logger.warning("numbers_create requires at least one header")
+        return None
+
+    def _esc(s: str) -> str:
+        return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+    esc_path = _esc(str(path))
+    esc_sheet = _esc(sheet_name)
+    esc_table = _esc(table_name)
+
+    header_lines: list[str] = []
+    for idx, header in enumerate(headers, start=1):
+        header_lines.append(f'set value of cell {idx} of row 1 to "{_esc(str(header))}"')
+    headers_block = "\n            ".join(header_lines)
+
+    sheet_name_setter = (
+        f'set name of first sheet of newDoc to "{esc_sheet}"'
+        if sheet_name
+        else ""
+    )
+    table_name_setter = (
+        f'set name of first table of first sheet of newDoc to "{esc_table}"'
+        if table_name
+        else ""
+    )
+    numbers_app = _numbers_app_target()
+
+    script = f'''
+    tell {numbers_app}
+        try
+            activate
+            set newDoc to make new document
+            save newDoc in POSIX file "{esc_path}"
+            {sheet_name_setter}
+            {table_name_setter}
+            set targetTable to first table of first sheet of newDoc
+            tell targetTable
+                set totalCols to count of columns
+                set requiredCols to {len(headers)}
+                repeat while totalCols < requiredCols
+                    make new column at end of columns
+                    set totalCols to totalCols + 1
+                end repeat
+                {headers_block}
+            end tell
+            save newDoc
+            close newDoc saving yes
+            return "{esc_path}"
+        on error errMsg
+            return "error: " & errMsg
+        end try
+    end tell
+    '''
+    result = _run_script(script, timeout=60.0)
+    if not result or result.startswith("error:"):
+        logger.warning("numbers_create failed: %s", result)
+        return None
+    return result
+
+
+def _normalize_numbers_rows_payload(rows: Any) -> list[list[Any]] | None:
+    if rows is None:
+        return []
+    if not isinstance(rows, list):
+        return None
+    normalized_rows: list[list[Any]] = []
+    for row in rows:
+        if isinstance(row, (list, tuple)):
+            normalized_rows.append(list(row))
+        else:
+            normalized_rows.append([row])
+    return normalized_rows
+
+
+def _validate_numbers_sheet_spec(sheet_spec: Any) -> tuple[dict[str, Any], str | None]:
+    if not isinstance(sheet_spec, dict):
+        return {}, "sheet spec must be a JSON object"
+
+    sheet_name = str(sheet_spec.get("sheet_name", "")).strip()
+    if not sheet_name:
+        return {}, "sheet_name is required"
+
+    headers_raw = sheet_spec.get("headers")
+    if not isinstance(headers_raw, list) or not headers_raw:
+        return {}, "headers must be a non-empty JSON array"
+    headers = [str(header) for header in headers_raw if str(header).strip()]
+    if len(headers) != len(headers_raw):
+        return {}, "headers must not contain empty values"
+
+    table_name = str(sheet_spec.get("table_name", "")).strip()
+    rows = _normalize_numbers_rows_payload(sheet_spec.get("rows"))
+    if rows is None:
+        return {}, "rows must be a JSON array when provided"
+
+    return {
+        "sheet_name": sheet_name,
+        "table_name": table_name,
+        "headers": headers,
+        "rows": rows,
+    }, None
+
+
+def numbers_add_sheet(file_path: str, sheet_spec: dict[str, Any]) -> dict[str, Any]:
+    """Add one initialized sheet to an existing Numbers workbook."""
+    path = Path(file_path).expanduser()
+    if not path.is_absolute():
+        return {"ok": False, "error": "absolute path required"}
+    if path.suffix.lower() != ".numbers":
+        return {"ok": False, "error": ".numbers path required"}
+    if not path.exists():
+        return {"ok": False, "error": "target document does not exist"}
+
+    normalized_spec, spec_error = _validate_numbers_sheet_spec(sheet_spec)
+    if spec_error:
+        return {"ok": False, "error": spec_error}
+
+    sheet_name = normalized_spec["sheet_name"]
+    table_name = normalized_spec["table_name"]
+    headers = normalized_spec["headers"]
+    rows = normalized_spec["rows"]
+    required_cols = max(1, max(len(headers), max((len(row) for row in rows), default=0)))
+
+    def _esc(s: str) -> str:
+        return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+    esc_path = _esc(str(path))
+    esc_sheet = _esc(sheet_name)
+    esc_table = _esc(table_name)
+
+    header_lines: list[str] = []
+    for idx, header in enumerate(headers, start=1):
+        header_lines.append(f'set value of cell {idx} of row 1 to "{_esc(str(header))}"')
+    headers_block = "\n                    ".join(header_lines)
+
+    row_lines: list[str] = []
+    for row in rows:
+        row_lines.extend(
+            [
+                "if insertionRow <= totalRows then",
+                "set targetRow to row insertionRow",
+                "else",
+                "set targetRow to make new row at end of rows",
+                "set totalRows to totalRows + 1",
+                "end if",
+            ]
+        )
+        for idx, value in enumerate(row, start=1):
+            if value is None:
+                row_lines.append(f"set value of cell {idx} of targetRow to \"\"")
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                row_lines.append(f"set value of cell {idx} of targetRow to {value}")
+            else:
+                row_lines.append(f'set value of cell {idx} of targetRow to "{_esc(str(value))}"')
+        row_lines.append("set insertionRow to insertionRow + 1")
+    rows_block = "\n                    ".join(row_lines) if row_lines else ""
+
+    table_name_setter = f'set name of targetTable to "{esc_table}"' if table_name else ""
+    rows_section = rows_block if rows_block else "-- no initial rows"
+    numbers_app = _numbers_app_target()
+
+    script = f'''
+    tell {numbers_app}
+        try
+            activate
+            set targetDoc to open POSIX file "{esc_path}"
+            tell targetDoc
+                set existingSheet to missing value
+                try
+                    set existingSheet to first sheet whose name is "{esc_sheet}"
+                end try
+                if existingSheet is not missing value then
+                    close targetDoc saving no
+                    return "error: sheet already exists"
+                end if
+
+                set newSheet to make new sheet at end of sheets
+                set name of newSheet to "{esc_sheet}"
+                tell newSheet
+                    set targetTable to first table
+                    {table_name_setter}
+                    tell targetTable
+                        set totalCols to count of columns
+                        set requiredCols to {required_cols}
+                        repeat while totalCols < requiredCols
+                            make new column at end of columns
+                            set totalCols to totalCols + 1
+                        end repeat
+                        set totalRows to count of rows
+                        set insertionRow to 2
+                        {headers_block}
+                        {rows_section}
+                    end tell
+                end tell
+            end tell
+            save targetDoc
+            close targetDoc saving yes
+            return "ok|{len(rows)}"
+        on error errMsg
+            return "error: " & errMsg
+        end try
+    end tell
+    '''
+    result = _run_script(script, timeout=90.0)
+    if not result:
+        return {"ok": False, "error": "no response from Numbers"}
+    if result.startswith("error:"):
+        return {"ok": False, "error": result}
+
+    rows_inserted = len(rows)
+    parts = result.split("|")
+    if len(parts) >= 2:
+        try:
+            rows_inserted = int(parts[1])
+        except ValueError:
+            pass
+    return {
+        "ok": True,
+        "sheet_name": sheet_name,
+        "table_name": table_name or "Table 1",
+        "rows_inserted": rows_inserted,
+    }
+
+
+def numbers_create_workbook(
+    file_path: str,
+    workbook_spec: dict[str, Any],
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Create a multi-sheet workbook from a workbook spec."""
+    if not isinstance(workbook_spec, dict):
+        return {"ok": False, "error": "workbook_json must be a JSON object"}
+    sheets_raw = workbook_spec.get("sheets")
+    if not isinstance(sheets_raw, list) or not sheets_raw:
+        return {"ok": False, "error": "workbook_json.sheets must be a non-empty JSON array"}
+
+    normalized_sheets: list[dict[str, Any]] = []
+    seen_sheet_names: set[str] = set()
+    for sheet_spec in sheets_raw:
+        normalized_spec, spec_error = _validate_numbers_sheet_spec(sheet_spec)
+        if spec_error:
+            return {"ok": False, "error": spec_error}
+        sheet_key = normalized_spec["sheet_name"].strip().lower()
+        if sheet_key in seen_sheet_names:
+            return {"ok": False, "error": f'duplicate sheet_name: "{normalized_spec["sheet_name"]}"'}
+        seen_sheet_names.add(sheet_key)
+        normalized_sheets.append(normalized_spec)
+
+    first_sheet = normalized_sheets[0]
+    created = numbers_create(
+        file_path,
+        headers=first_sheet["headers"],
+        sheet_name=first_sheet["sheet_name"],
+        table_name=first_sheet["table_name"],
+        overwrite=overwrite,
+    )
+    if not created:
+        return {"ok": False, "error": "failed to create workbook"}
+
+    rows_inserted_total = 0
+    first_rows = first_sheet["rows"]
+    if first_rows:
+        first_insert = numbers_append_rows(
+            file_path,
+            rows=first_rows,
+            sheet_name=first_sheet["sheet_name"],
+            table_name=first_sheet["table_name"],
+            insert_position="after-data",
+        )
+        if not first_insert.get("ok"):
+            return {"ok": False, "error": str(first_insert.get("error", "failed to insert initial rows"))}
+        rows_inserted_total += int(first_insert.get("inserted_rows", len(first_rows)))
+
+    for sheet_spec in normalized_sheets[1:]:
+        add_result = numbers_add_sheet(file_path, sheet_spec)
+        if not add_result.get("ok"):
+            return {
+                "ok": False,
+                "error": str(add_result.get("error", "failed to add sheet")),
+                "sheets_created": len(normalized_sheets[: normalized_sheets.index(sheet_spec)]),
+            }
+        rows_inserted_total += int(add_result.get("rows_inserted", len(sheet_spec["rows"])))
+
+    return {
+        "ok": True,
+        "path": str(Path(file_path).expanduser()),
+        "sheets_created": len(normalized_sheets),
+        "rows_inserted_total": rows_inserted_total,
+    }
+
+
+def numbers_append_rows(
+    file_path: str,
+    rows: list[list[Any]],
+    sheet_name: str = "",
+    table_name: str = "",
+    insert_position: str = "after-data",
+) -> dict[str, Any]:
+    """Append one or more rows to a Numbers table."""
+    path = Path(file_path).expanduser()
+    if not path.is_absolute():
+        return {"ok": False, "error": "absolute path required"}
+    if path.suffix.lower() != ".numbers":
+        return {"ok": False, "error": ".numbers path required"}
+    if not path.exists():
+        return {"ok": False, "error": "target document does not exist"}
+    if insert_position not in {"after-headers", "after-data", "at-end"}:
+        return {"ok": False, "error": "invalid insert position"}
+    if not rows:
+        return {"ok": False, "error": "rows must not be empty"}
+
+    normalized_rows: list[list[Any]] = []
+    for row in rows:
+        if isinstance(row, (list, tuple)):
+            normalized_rows.append(list(row))
+        else:
+            normalized_rows.append([row])
+    required_cols = max(1, max((len(row) for row in normalized_rows), default=1))
+
+    def _esc(s: str) -> str:
+        return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+    esc_path = _esc(str(path))
+    esc_sheet = _esc(sheet_name)
+    esc_table = _esc(table_name)
+    esc_position = _esc(insert_position)
+
+    if insert_position == "after-headers":
+        target_row_block = '''if insertionRow <= totalRows then
+                    set anchorRow to row insertionRow
+                    set targetRow to make new row at before anchorRow
+                else
+                    set targetRow to make new row at end of rows
+                end if
+                set totalRows to totalRows + 1'''
+    elif insert_position == "at-end":
+        target_row_block = '''set targetRow to make new row at end of rows
+                set totalRows to totalRows + 1'''
+    else:
+        target_row_block = '''if insertionRow > totalRows then
+                    set targetRow to make new row at end of rows
+                    set totalRows to totalRows + 1
+                else
+                    set targetRow to row insertionRow
+                end if'''
+
+    row_lines: list[str] = []
+    for row in normalized_rows:
+        row_lines.append(target_row_block)
+        for idx, value in enumerate(row, start=1):
+            if value is None:
+                row_lines.append(f"set value of cell {idx} of targetRow to \"\"")
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                row_lines.append(f"set value of cell {idx} of targetRow to {value}")
+            else:
+                row_lines.append(f'set value of cell {idx} of targetRow to "{_esc(str(value))}"')
+        row_lines.append("set insertionRow to insertionRow + 1")
+    rows_block = "\n                ".join(row_lines)
+
+    sheet_lookup = (
+        f'set targetSheet to (first sheet of targetDoc whose name is "{esc_sheet}")'
+        if sheet_name
+        else "set targetSheet to first sheet of targetDoc"
+    )
+    table_lookup = (
+        f'set targetTable to (first table of targetSheet whose name is "{esc_table}")'
+        if table_name
+        else "set targetTable to first table of targetSheet"
+    )
+    numbers_app = _numbers_app_target()
+
+    script = f'''
+    tell {numbers_app}
+        try
+            activate
+            set targetDoc to open POSIX file "{esc_path}"
+            {sheet_lookup}
+            {table_lookup}
+
+            tell targetTable
+                set totalRows to count of rows
+                set totalCols to count of columns
+                set requiredCols to {required_cols}
+                repeat while totalCols < requiredCols
+                    make new column at end of columns
+                    set totalCols to totalCols + 1
+                end repeat
+                set scanCols to totalCols
+                if scanCols < 1 then set scanCols to 1
+                set headerRows to 1
+                try
+                    set headerRows to header row count
+                end try
+                if headerRows < 1 then set headerRows to 1
+                set dataStartRow to headerRows + 1
+
+                if "{esc_position}" is "after-headers" then
+                    set insertionRow to dataStartRow
+                else if "{esc_position}" is "at-end" then
+                    set insertionRow to totalRows + 1
+                else
+                    set lastDataRow to headerRows
+                    if totalRows >= dataStartRow then
+                        repeat with r from dataStartRow to totalRows
+                            set rowHasData to false
+                            repeat with c from 1 to scanCols
+                                set cellVal to missing value
+                                try
+                                    set cellVal to value of cell c of row r
+                                on error
+                                    set cellVal to missing value
+                                end try
+                                if cellVal is not missing value then
+                                    try
+                                        if (cellVal as text) is not "" then
+                                            set rowHasData to true
+                                            exit repeat
+                                        end if
+                                    on error
+                                        set rowHasData to true
+                                        exit repeat
+                                    end try
+                                end if
+                            end repeat
+                            if rowHasData then set lastDataRow to r
+                        end repeat
+                    end if
+                    set insertionRow to lastDataRow + 1
+                end if
+
+                set startRow to insertionRow
+                {rows_block}
+            end tell
+
+            save targetDoc
+            close targetDoc saving yes
+            return "ok|" & startRow & "|" & (insertionRow - 1)
+        on error errMsg
+            return "error: " & errMsg
+        end try
+    end tell
+    '''
+    result = _run_script(script, timeout=60.0)
+    if not result:
+        return {"ok": False, "error": "no response from Numbers"}
+    if result.startswith("error:"):
+        return {"ok": False, "error": result}
+
+    parts = result.split("|")
+    start_row = -1
+    insert_after_row = -1
+    if len(parts) >= 3:
+        try:
+            start_row = int(parts[1])
+            insert_after_row = int(parts[2])
+        except ValueError:
+            pass
+    return {
+        "ok": True,
+        "insert_position": insert_position,
+        "attempted_rows": len(normalized_rows),
+        "inserted_rows": len(normalized_rows),
+        "start_row": start_row,
+        "insert_after_row": insert_after_row,
+    }
+
+
+def _normalize_numbers_color_triplet(value: Any) -> tuple[int, int, int] | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return None
+    channels: list[float] = []
+    for channel in value:
+        if isinstance(channel, bool):
+            return None
+        try:
+            numeric = float(channel)
+        except (TypeError, ValueError):
+            return None
+        if numeric < 0:
+            return None
+        channels.append(numeric)
+    if all(channel <= 255 for channel in channels):
+        return tuple(int(round(channel * 257)) for channel in channels)
+    if all(channel <= 65535 for channel in channels):
+        return tuple(int(round(channel)) for channel in channels)
+    return None
+
+
+def _validate_numbers_style_target(target: Any) -> tuple[dict[str, int | str], str | None]:
+    if not isinstance(target, dict):
+        return {}, "target_json must be a JSON object"
+    scope = str(target.get("scope", "")).strip().lower()
+    if scope not in {"table", "row", "column", "cell", "range"}:
+        return {}, "target_json.scope must be one of: table|row|column|cell|range"
+
+    def _positive_int(key: str) -> tuple[int | None, str | None]:
+        value = target.get(key)
+        if isinstance(value, bool):
+            return None, f"target_json.{key} must be a positive integer"
+        try:
+            int_value = int(value)
+        except (TypeError, ValueError):
+            return None, f"target_json.{key} must be a positive integer"
+        if int_value < 1:
+            return None, f"target_json.{key} must be >= 1"
+        return int_value, None
+
+    normalized: dict[str, int | str] = {"scope": scope}
+    if scope == "table":
+        return normalized, None
+    if scope == "row":
+        index, err = _positive_int("index")
+        if err:
+            return {}, err
+        normalized["index"] = int(index)
+        return normalized, None
+    if scope == "column":
+        index, err = _positive_int("index")
+        if err:
+            return {}, err
+        normalized["index"] = int(index)
+        return normalized, None
+    if scope == "cell":
+        row, err = _positive_int("row")
+        if err:
+            return {}, err
+        col, err = _positive_int("column")
+        if err:
+            return {}, err
+        normalized["row"] = int(row)
+        normalized["column"] = int(col)
+        return normalized, None
+
+    start_row, err = _positive_int("start_row")
+    if err:
+        return {}, err
+    end_row, err = _positive_int("end_row")
+    if err:
+        return {}, err
+    start_col, err = _positive_int("start_column")
+    if err:
+        return {}, err
+    end_col, err = _positive_int("end_column")
+    if err:
+        return {}, err
+    if int(start_row) > int(end_row):
+        return {}, "target_json start_row must be <= end_row"
+    if int(start_col) > int(end_col):
+        return {}, "target_json start_column must be <= end_column"
+    normalized["start_row"] = int(start_row)
+    normalized["end_row"] = int(end_row)
+    normalized["start_column"] = int(start_col)
+    normalized["end_column"] = int(end_col)
+    return normalized, None
+
+
+def _validate_numbers_style(style: Any, target_scope: str) -> tuple[dict[str, Any], str | None]:
+    if not isinstance(style, dict):
+        return {}, "style_json must be a JSON object"
+    if not style:
+        return {}, "style_json must not be empty"
+
+    allowed_keys = {
+        "background_color",
+        "text_color",
+        "font_name",
+        "font_size",
+        "alignment",
+        "number_format",
+        "text_wrap",
+        "row_height",
+        "column_width",
+    }
+    unknown = sorted(set(style.keys()) - allowed_keys)
+    if unknown:
+        return {}, f"unsupported style key(s): {', '.join(unknown)}"
+
+    normalized: dict[str, Any] = {}
+    for color_key in ("background_color", "text_color"):
+        if color_key in style:
+            color = _normalize_numbers_color_triplet(style[color_key])
+            if color is None:
+                return {}, f"style_json.{color_key} must be [r,g,b] with values in 0-255 or 0-65535"
+            normalized[color_key] = color
+
+    if "font_name" in style:
+        font_name = str(style["font_name"]).strip()
+        if not font_name:
+            return {}, "style_json.font_name must be a non-empty string"
+        normalized["font_name"] = font_name
+
+    for numeric_key in ("font_size", "row_height", "column_width"):
+        if numeric_key not in style:
+            continue
+        value = style[numeric_key]
+        if isinstance(value, bool):
+            return {}, f"style_json.{numeric_key} must be a positive number"
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return {}, f"style_json.{numeric_key} must be a positive number"
+        if numeric <= 0:
+            return {}, f"style_json.{numeric_key} must be > 0"
+        normalized[numeric_key] = numeric
+
+    if "alignment" in style:
+        alignment = str(style["alignment"]).strip().lower()
+        if alignment not in {"left", "center", "right", "justified", "natural"}:
+            return {}, "style_json.alignment must be one of: left|center|right|justified|natural"
+        normalized["alignment"] = alignment
+
+    if "number_format" in style:
+        number_format = str(style["number_format"]).strip().lower()
+        if number_format not in {"automatic", "currency", "percentage", "scientific", "fraction", "text"}:
+            return {}, "style_json.number_format must be one of: automatic|currency|percentage|scientific|fraction|text"
+        normalized["number_format"] = number_format
+
+    if "text_wrap" in style:
+        text_wrap = style["text_wrap"]
+        if not isinstance(text_wrap, bool):
+            return {}, "style_json.text_wrap must be true or false"
+        normalized["text_wrap"] = text_wrap
+
+    if target_scope == "row" and "column_width" in normalized:
+        return {}, "column_width is not supported for row target scope"
+    if target_scope == "column" and "row_height" in normalized:
+        return {}, "row_height is not supported for column target scope"
+
+    return normalized, None
+
+
+def numbers_style_apply(
+    file_path: str,
+    target: dict[str, Any],
+    style: dict[str, Any],
+    sheet_name: str = "",
+    table_name: str = "",
+) -> dict[str, Any]:
+    """Apply formatting/style to a Numbers target scope."""
+    path = Path(file_path).expanduser()
+    if not path.is_absolute():
+        return {"ok": False, "error": "absolute path required"}
+    if path.suffix.lower() != ".numbers":
+        return {"ok": False, "error": ".numbers path required"}
+    if not path.exists():
+        return {"ok": False, "error": "target document does not exist"}
+
+    normalized_target, target_error = _validate_numbers_style_target(target)
+    if target_error:
+        return {"ok": False, "error": target_error}
+
+    target_scope = str(normalized_target["scope"])
+    normalized_style, style_error = _validate_numbers_style(style, target_scope=target_scope)
+    if style_error:
+        return {"ok": False, "error": style_error}
+
+    cell_style_keys = {
+        "background_color",
+        "text_color",
+        "font_name",
+        "font_size",
+        "alignment",
+        "number_format",
+        "text_wrap",
+    }
+    has_cell_styles = any(key in normalized_style for key in cell_style_keys)
+
+    def _esc(text: str) -> str:
+        return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+    def _num_literal(value: float) -> str:
+        return str(int(value)) if float(value).is_integer() else str(value)
+
+    cell_style_lines: list[str] = []
+    if "background_color" in normalized_style:
+        r, g, b = normalized_style["background_color"]
+        cell_style_lines.append(f"set background color of cellRef to {{{r}, {g}, {b}}}")
+    if "text_color" in normalized_style:
+        r, g, b = normalized_style["text_color"]
+        cell_style_lines.append(f"set text color of cellRef to {{{r}, {g}, {b}}}")
+    if "font_name" in normalized_style:
+        cell_style_lines.append(f'set font name of cellRef to "{_esc(normalized_style["font_name"])}"')
+    if "font_size" in normalized_style:
+        cell_style_lines.append(f"set font size of cellRef to {_num_literal(normalized_style['font_size'])}")
+    if "alignment" in normalized_style:
+        cell_style_lines.append(f"set alignment of cellRef to {normalized_style['alignment']}")
+    if "number_format" in normalized_style:
+        cell_style_lines.append(f"set format of cellRef to {normalized_style['number_format']}")
+    if "text_wrap" in normalized_style:
+        cell_style_lines.append(
+            f"set text wrap of cellRef to {'true' if normalized_style['text_wrap'] else 'false'}"
+        )
+    cell_styles_block = "\n                        ".join(cell_style_lines)
+
+    has_row_height = "row_height" in normalized_style
+    has_column_width = "column_width" in normalized_style
+    row_height_line = _num_literal(float(normalized_style["row_height"])) if has_row_height else ""
+    column_width_line = _num_literal(float(normalized_style["column_width"])) if has_column_width else ""
+
+    if target_scope == "table":
+        table_row_height_block = ""
+        if has_row_height:
+            table_row_height_block = f'''
+                repeat with r from 1 to totalRows
+                    set height of row r to {row_height_line}
+                end repeat
+                set rowsResized to totalRows
+            '''
+        table_column_width_block = ""
+        if has_column_width:
+            table_column_width_block = f'''
+                repeat with c from 1 to totalCols
+                    set width of column c to {column_width_line}
+                end repeat
+                set columnsResized to totalCols
+            '''
+        scope_block = f'''
+                if {str(has_cell_styles).lower()} then
+                    repeat with r from 1 to totalRows
+                        repeat with c from 1 to totalCols
+                            set cellRef to cell c of row r
+                            {cell_styles_block}
+                        end repeat
+                    end repeat
+                    set cellsTouched to totalRows * totalCols
+                end if
+                {table_row_height_block}
+                {table_column_width_block}
+        '''
+    elif target_scope == "row":
+        row_index = int(normalized_target["index"])
+        row_height_block = ""
+        if has_row_height:
+            row_height_block = f'''
+                set height of row {row_index} to {row_height_line}
+                set rowsResized to 1
+            '''
+        scope_block = f'''
+                if {row_index} > totalRows then return "error: target row out of bounds"
+                if {str(has_cell_styles).lower()} then
+                    repeat with c from 1 to totalCols
+                        set cellRef to cell c of row {row_index}
+                        {cell_styles_block}
+                    end repeat
+                    set cellsTouched to totalCols
+                end if
+                {row_height_block}
+        '''
+    elif target_scope == "column":
+        column_index = int(normalized_target["index"])
+        column_width_block = ""
+        if has_column_width:
+            column_width_block = f'''
+                set width of column {column_index} to {column_width_line}
+                set columnsResized to 1
+            '''
+        scope_block = f'''
+                if {column_index} > totalCols then return "error: target column out of bounds"
+                if {str(has_cell_styles).lower()} then
+                    repeat with r from 1 to totalRows
+                        set cellRef to cell {column_index} of row r
+                        {cell_styles_block}
+                    end repeat
+                    set cellsTouched to totalRows
+                end if
+                {column_width_block}
+        '''
+    elif target_scope == "cell":
+        row_index = int(normalized_target["row"])
+        column_index = int(normalized_target["column"])
+        cell_row_height_block = ""
+        if has_row_height:
+            cell_row_height_block = f'''
+                set height of row {row_index} to {row_height_line}
+                set rowsResized to 1
+            '''
+        cell_column_width_block = ""
+        if has_column_width:
+            cell_column_width_block = f'''
+                set width of column {column_index} to {column_width_line}
+                set columnsResized to 1
+            '''
+        scope_block = f'''
+                if {row_index} > totalRows then return "error: target row out of bounds"
+                if {column_index} > totalCols then return "error: target column out of bounds"
+                if {str(has_cell_styles).lower()} then
+                    set cellRef to cell {column_index} of row {row_index}
+                    {cell_styles_block}
+                    set cellsTouched to 1
+                end if
+                {cell_row_height_block}
+                {cell_column_width_block}
+        '''
+    else:
+        start_row = int(normalized_target["start_row"])
+        end_row = int(normalized_target["end_row"])
+        start_column = int(normalized_target["start_column"])
+        end_column = int(normalized_target["end_column"])
+        range_row_height_block = ""
+        if has_row_height:
+            range_row_height_block = f'''
+                repeat with r from {start_row} to {end_row}
+                    set height of row r to {row_height_line}
+                end repeat
+                set rowsResized to rangeRowCount
+            '''
+        range_column_width_block = ""
+        if has_column_width:
+            range_column_width_block = f'''
+                repeat with c from {start_column} to {end_column}
+                    set width of column c to {column_width_line}
+                end repeat
+                set columnsResized to rangeColCount
+            '''
+        scope_block = f'''
+                if {end_row} > totalRows then return "error: range row out of bounds"
+                if {end_column} > totalCols then return "error: range column out of bounds"
+                set rangeRowCount to ({end_row} - {start_row}) + 1
+                set rangeColCount to ({end_column} - {start_column}) + 1
+                if {str(has_cell_styles).lower()} then
+                    repeat with r from {start_row} to {end_row}
+                        repeat with c from {start_column} to {end_column}
+                            set cellRef to cell c of row r
+                            {cell_styles_block}
+                        end repeat
+                    end repeat
+                    set cellsTouched to rangeRowCount * rangeColCount
+                end if
+                {range_row_height_block}
+                {range_column_width_block}
+        '''
+
+    esc_path = _esc(str(path))
+    esc_sheet = _esc(sheet_name)
+    esc_table = _esc(table_name)
+    sheet_lookup = (
+        f'set targetSheet to (first sheet of targetDoc whose name is "{esc_sheet}")'
+        if sheet_name
+        else "set targetSheet to first sheet of targetDoc"
+    )
+    table_lookup = (
+        f'set targetTable to (first table of targetSheet whose name is "{esc_table}")'
+        if table_name
+        else "set targetTable to first table of targetSheet"
+    )
+    numbers_app = _numbers_app_target()
+
+    script = f'''
+    tell {numbers_app}
+        try
+            activate
+            set targetDoc to open POSIX file "{esc_path}"
+            {sheet_lookup}
+            {table_lookup}
+
+            tell targetTable
+                set totalRows to count of rows
+                set totalCols to count of columns
+                set cellsTouched to 0
+                set rowsResized to 0
+                set columnsResized to 0
+                {scope_block}
+            end tell
+
+            save targetDoc
+            close targetDoc saving yes
+            return "ok|" & cellsTouched & "|" & rowsResized & "|" & columnsResized
+        on error errMsg
+            return "error: " & errMsg
+        end try
+    end tell
+    '''
+    result = _run_script(script, timeout=90.0)
+    if not result:
+        return {"ok": False, "error": "no response from Numbers"}
+    if result.startswith("error:"):
+        return {"ok": False, "error": result}
+
+    cells_touched = 0
+    rows_resized = 0
+    columns_resized = 0
+    parts = result.split("|")
+    if len(parts) >= 4:
+        try:
+            cells_touched = int(parts[1])
+            rows_resized = int(parts[2])
+            columns_resized = int(parts[3])
+        except ValueError:
+            pass
+
+    return {
+        "ok": True,
+        "target_scope": target_scope,
+        "applied_keys": list(normalized_style.keys()),
+        "cells_touched": cells_touched,
+        "rows_resized": rows_resized,
+        "columns_resized": columns_resized,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -992,24 +3481,24 @@ def mail_move_to_label(
                     end repeat
                 end if
                 if destinationBox is missing value then error "destination mailbox not found"
-                set sourceMatches to (every message of sourceBox whose {match_clause})
-                if (count of sourceMatches) is 0 then error "message not found in source mailbox"
+                try
+                    set matchedMsg to first message of sourceBox whose {match_clause}
+                on error
+                    error "message not found in source mailbox"
+                end try
 
-                repeat with matchedMsg in sourceMatches
-                    move matchedMsg to destinationBox
-                end repeat
+                move matchedMsg to destinationBox
 
-                set sourceRemaining to count of (every message of sourceBox whose {match_clause})
-                set destinationCount to count of (every message of destinationBox whose {match_clause})
-
-                -- Some accounts behave like label assignment; retry once if source still has the message.
-                if destinationCount > 0 and sourceRemaining > 0 then
-                    repeat with lingeringMsg in (every message of sourceBox whose {match_clause})
-                        move lingeringMsg to destinationBox
-                    end repeat
+                try
                     set sourceRemaining to count of (every message of sourceBox whose {match_clause})
+                on error
+                    set sourceRemaining to 0
+                end try
+                try
                     set destinationCount to count of (every message of destinationBox whose {match_clause})
-                end if
+                on error
+                    set destinationCount to 0
+                end try
 
                 if destinationCount > 0 and sourceRemaining is 0 then
                     return "ok_exclusive"
