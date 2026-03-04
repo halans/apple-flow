@@ -620,33 +620,72 @@ class ApprovalHandler:
         allow_tools: bool = False,
         cwd: str | None = None,
     ) -> str:
-        if self.enable_progress_streaming and hasattr(self.connector, "run_turn_streaming"):
-            return self._run_with_progress(
-                sender,
-                thread_id,
-                prompt,
-                run_id=run_id,
-                step=step,
-                phase=phase,
-                team_context=team_context,
-                egress_context=egress_context,
-                allow_tools=allow_tools,
-                cwd=cwd,
-            )
-        return self._run_with_heartbeat(
-            sender=sender,
-            runner=lambda: self._run_connector_turn(
-                thread_id,
-                prompt,
-                team_context,
-                allow_tools=allow_tools,
-                cwd=cwd,
-            ),
+        started_at = time.monotonic()
+        connector_name = type(self.connector).__name__
+        self._create_event(
             run_id=run_id,
             step=step,
-            phase=phase,
-            egress_context=egress_context,
+            event_type="connector_started",
+            payload={"phase": phase, "connector": connector_name},
         )
+        try:
+            if self.enable_progress_streaming and hasattr(self.connector, "run_turn_streaming"):
+                output = self._run_with_progress(
+                    sender,
+                    thread_id,
+                    prompt,
+                    run_id=run_id,
+                    step=step,
+                    phase=phase,
+                    team_context=team_context,
+                    egress_context=egress_context,
+                    allow_tools=allow_tools,
+                    cwd=cwd,
+                )
+            else:
+                output = self._run_with_heartbeat(
+                    sender=sender,
+                    runner=lambda: self._run_connector_turn(
+                        thread_id,
+                        prompt,
+                        team_context,
+                        allow_tools=allow_tools,
+                        cwd=cwd,
+                    ),
+                    run_id=run_id,
+                    step=step,
+                    phase=phase,
+                    egress_context=egress_context,
+                )
+            duration_ms = int((time.monotonic() - started_at) * 1000)
+            self._create_event(
+                run_id=run_id,
+                step=step,
+                event_type="connector_completed",
+                payload={
+                    "phase": phase,
+                    "connector": connector_name,
+                    "duration_ms": duration_ms,
+                    "snippet": output[:200],
+                    "status": "completed",
+                },
+            )
+            return output
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - started_at) * 1000)
+            self._create_event(
+                run_id=run_id,
+                step=step,
+                event_type="connector_failed",
+                payload={
+                    "phase": phase,
+                    "connector": connector_name,
+                    "duration_ms": duration_ms,
+                    "reason": f"{type(exc).__name__}: {exc}",
+                    "status": "failed",
+                },
+            )
+            raise
 
     def _get_run_request_text(self, run_id: str) -> str:
         """Best-effort retrieval of the original task/project request text."""
@@ -843,12 +882,26 @@ class ApprovalHandler:
 
     def _create_event(self, run_id: str, step: str, event_type: str, payload: dict[str, Any]) -> None:
         if hasattr(self.store, "create_event"):
+            event_payload = dict(payload or {})
+            source_context = self.store.get_run_source_context(run_id) if hasattr(self.store, "get_run_source_context") else {}
+            run = self.store.get_run(run_id) if hasattr(self.store, "get_run") else {}
+            if isinstance(source_context, dict):
+                channel = source_context.get("channel")
+                if channel and "channel" not in event_payload:
+                    event_payload["channel"] = channel
+            if isinstance(run, dict):
+                sender = run.get("sender")
+                workspace = run.get("cwd")
+                if sender and "sender" not in event_payload:
+                    event_payload["sender"] = sender
+                if workspace and "workspace" not in event_payload:
+                    event_payload["workspace"] = workspace
             self.store.create_event(
                 event_id=f"evt_{uuid4().hex[:12]}",
                 run_id=run_id,
                 step=step,
                 event_type=event_type,
-                payload=payload,
+                payload=event_payload,
             )
 
     def _safe_send(

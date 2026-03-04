@@ -157,7 +157,9 @@ def _section_for_key(key: str) -> str:
         return "scheduler"
     if key.startswith("apple_flow_enable_office_sync") or key.startswith("apple_flow_supabase_") or key.startswith(
         "apple_flow_office_sync_"
-    ) or key.startswith("apple_flow_log_file_path"):
+    ) or key.startswith("apple_flow_log_file_path") or key.startswith("apple_flow_enable_csv_audit_log") or key.startswith(
+        "apple_flow_csv_audit_"
+    ) or key.startswith("apple_flow_enable_markdown_automation_log"):
         return "office_sync"
     return "core"
 

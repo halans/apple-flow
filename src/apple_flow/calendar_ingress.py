@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
+import os
 import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .models import InboundMessage
 from .protocols import StoreProtocol
@@ -66,6 +69,8 @@ class AppleCalendarIngress:
             summary = (raw.get("summary", "") or "").strip()
             description = (raw.get("description", "") or "").strip()
             start_date = raw.get("start_date", "")
+            event_url = (raw.get("url", "") or "").strip()
+            attachments = self._parse_attachments_field(raw.get("attachments", "") or "")
 
             # Skip events that don't contain the trigger tag (if configured).
             if self.trigger_tag:
@@ -85,6 +90,17 @@ class AppleCalendarIngress:
 
             received_at = start_date or datetime.now(timezone.utc).isoformat()
 
+            context = {
+                "channel": "calendar",
+                "event_id": event_id,
+                "event_summary": summary,
+                "calendar_name": self.calendar_name,
+            }
+            if event_url:
+                context["event_url"] = event_url
+            if attachments:
+                context["attachments"] = attachments
+
             messages.append(
                 InboundMessage(
                     id=f"cal_{event_id}",
@@ -92,12 +108,7 @@ class AppleCalendarIngress:
                     text=prefixed_text,
                     received_at=received_at,
                     is_from_me=False,
-                    context={
-                        "channel": "calendar",
-                        "event_id": event_id,
-                        "event_summary": summary,
-                        "calendar_name": self.calendar_name,
-                    },
+                    context=context,
                 )
             )
 
@@ -207,7 +218,43 @@ class AppleCalendarIngress:
                     set eStartStr to ""
                 end try
 
-                set end of outputLines to eIdStr & tab & eSummaryStr & tab & eDescStr & tab & eStartStr
+                try
+                    set eUrl to url of evt
+                    if eUrl is missing value then
+                        set eUrlStr to ""
+                    else
+                        set eUrlStr to my sanitise(eUrl as text)
+                    end if
+                on error
+                    set eUrlStr to ""
+                end try
+
+                try
+                    set attLines to {{}}
+                    set eventAttachments to (attachments of evt)
+                    repeat with att in eventAttachments
+                        set attPath to ""
+                        try
+                            set attPath to (file name of att as text)
+                        on error
+                            try
+                                set attPath to (name of att as text)
+                            on error
+                                set attPath to ""
+                            end try
+                        end try
+                        if attPath is not "" then
+                            set end of attLines to my sanitise(attPath)
+                        end if
+                    end repeat
+                    set AppleScript's text item delimiters to "|||"
+                    set eAttachStr to attLines as text
+                    set AppleScript's text item delimiters to ""
+                on error
+                    set eAttachStr to ""
+                end try
+
+                set end of outputLines to eIdStr & tab & eSummaryStr & tab & eDescStr & tab & eStartStr & tab & eUrlStr & tab & eAttachStr
             end repeat
 
             set AppleScript's text item delimiters to linefeed
@@ -247,10 +294,36 @@ class AppleCalendarIngress:
             parts = line.split("\t")
             if len(parts) < 4:
                 continue
-            events.append({
+            item = {
                 "id": parts[0],
                 "summary": parts[1],
                 "description": parts[2],
                 "start_date": parts[3],
-            })
+            }
+            if len(parts) >= 5:
+                item["url"] = parts[4]
+            if len(parts) >= 6:
+                item["attachments"] = parts[5]
+            events.append(item)
         return events
+
+    @staticmethod
+    def _parse_attachments_field(raw: str) -> list[dict[str, str]]:
+        attachments: list[dict[str, str]] = []
+        for item in raw.split("|||"):
+            path = item.strip()
+            if not path:
+                continue
+            if path.startswith("~"):
+                path = os.path.expanduser(path)
+            filename = Path(path).name if path else "unknown"
+            mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            attachments.append(
+                {
+                    "path": path,
+                    "filename": filename or "unknown",
+                    "mime_type": mime_type,
+                    "size_bytes": "0",
+                }
+            )
+        return attachments

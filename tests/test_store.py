@@ -112,3 +112,75 @@ def test_requeue_expired_run_jobs(tmp_path):
     assert recovered == 1
     jobs = store.list_run_jobs(run_id="run_2")
     assert jobs[0]["status"] == "queued"
+
+
+def test_create_event_mirrors_to_csv_audit(tmp_path):
+    class RecordingCsvLogger:
+        def __init__(self) -> None:
+            self.rows = []
+
+        def append_event(self, event_row):
+            self.rows.append(event_row)
+
+    csv_logger = RecordingCsvLogger()
+    db_path = tmp_path / "relay.db"
+    store = SQLiteStore(db_path, csv_audit_logger=csv_logger)
+    store.bootstrap()
+    store.create_run(
+        run_id="run_3",
+        sender="+15551234567",
+        intent="task",
+        state="queued",
+        cwd="/tmp/workspace",
+        risk_level="execute",
+        source_context={"channel": "mail"},
+    )
+
+    store.create_event(
+        event_id="evt_3",
+        run_id="run_3",
+        step="executor",
+        event_type="execution_started",
+        payload={"attempt": 1, "status": "running", "snippet": "started"},
+    )
+
+    events = store.list_events_for_run("run_3", limit=10)
+    assert len(events) == 1
+    assert len(csv_logger.rows) == 1
+    row = csv_logger.rows[0]
+    assert row["event_id"] == "evt_3"
+    assert row["run_id"] == "run_3"
+    assert row["channel"] == "mail"
+    assert row["workspace"] == "/tmp/workspace"
+    assert row["attempt"] == 1
+    assert row["status"] == "running"
+
+
+def test_create_event_db_write_survives_csv_failure(tmp_path):
+    class FailingCsvLogger:
+        def append_event(self, _event_row):
+            raise RuntimeError("csv append failed")
+
+    db_path = tmp_path / "relay.db"
+    store = SQLiteStore(db_path, csv_audit_logger=FailingCsvLogger())
+    store.bootstrap()
+    store.create_run(
+        run_id="run_4",
+        sender="+15551234567",
+        intent="task",
+        state="queued",
+        cwd="/tmp/workspace",
+        risk_level="execute",
+    )
+
+    store.create_event(
+        event_id="evt_4",
+        run_id="run_4",
+        step="executor",
+        event_type="execution_started",
+        payload={},
+    )
+
+    events = store.list_events_for_run("run_4", limit=10)
+    assert len(events) == 1
+    assert events[0]["event_id"] == "evt_4"

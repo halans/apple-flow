@@ -321,6 +321,21 @@ Or build/export from source docs: [docs/MACOS_GUI_APP_EXPORT.md](docs/MACOS_GUI_
 
 Details: [SECURITY.md](SECURITY.md)
 
+## Audit Logging
+
+Apple Flow now supports a CSV-first analytics log while keeping SQLite as the canonical audit store.
+
+- Canonical audit source: SQLite `events` table (`/audit/events` endpoint).
+- Analytics mirror: `agent-office/90_logs/events.csv` (append-only, one row per event).
+- Human-readable markdown mirror: disabled by default.
+
+Relevant `.env` settings:
+
+- `apple_flow_enable_csv_audit_log=true`
+- `apple_flow_csv_audit_log_path=agent-office/90_logs/events.csv`
+- `apple_flow_csv_audit_include_headers_if_missing=true`
+- `apple_flow_enable_markdown_automation_log=false`
+
 ## Service Management
 
 ```bash

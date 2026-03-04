@@ -111,6 +111,7 @@ class CompanionLoop:
             try:
                 await asyncio.to_thread(self._check_and_notify)
             except Exception as exc:
+                self._log_to_office("observation_error", [], str(exc))
                 logger.exception("Companion observation error: %s", exc)
             await asyncio.sleep(self.config.companion_poll_interval_seconds)
 
@@ -119,13 +120,13 @@ class CompanionLoop:
         self.store.set_state("companion_last_check_at", datetime.now().isoformat())
 
         if self._is_muted():
-            self.store.set_state("companion_last_skip_reason", "muted")
+            self._record_observation_skip("muted")
             return
         if self._is_quiet_hours():
-            self.store.set_state("companion_last_skip_reason", "quiet_hours")
+            self._record_observation_skip("quiet_hours")
             return
         if self._is_rate_limited():
-            self.store.set_state("companion_last_skip_reason", "rate_limited")
+            self._record_observation_skip("rate_limited")
             return
 
         observations = self._gather_observations()
@@ -142,7 +143,7 @@ class CompanionLoop:
         self.store.set_state("companion_last_obs_count", str(len(observations)))
 
         if not observations:
-            self.store.set_state("companion_last_skip_reason", "no_observations")
+            self._record_observation_skip("no_observations")
             return
 
         message = self._synthesize_message(observations)
@@ -153,7 +154,12 @@ class CompanionLoop:
             self.store.set_state("companion_last_sent_at", datetime.now().isoformat())
             self.store.set_state("companion_last_skip_reason", "")
         else:
-            self.store.set_state("companion_last_skip_reason", "synthesis_empty")
+            self._record_observation_skip("synthesis_empty", observations=observations)
+
+    def _record_observation_skip(self, reason: str, observations: list[str] | None = None) -> None:
+        """Persist skip telemetry and append to automation-log.md."""
+        self.store.set_state("companion_last_skip_reason", reason)
+        self._log_to_office("observation_skip", observations or [], reason)
 
     def _gather_observations(self) -> list[str]:
         """Collect notable observations from the user's environment."""
@@ -649,6 +655,8 @@ class CompanionLoop:
 
     def _log_to_office(self, action: str, observations: list[str], message: str) -> None:
         """Append a log entry to agent-office/90_logs/automation-log.md."""
+        if not bool(getattr(self.config, "enable_markdown_automation_log", False)):
+            return
         if not self.office_path:
             return
         log_path = self.office_path / "90_logs" / "automation-log.md"

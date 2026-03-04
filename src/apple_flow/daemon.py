@@ -21,6 +21,7 @@ from .codex_cli_connector import CodexCliConnector
 from .commanding import CommandKind, parse_command
 from .companion import CompanionLoop
 from .config import RelaySettings
+from .csv_audit import CsvAuditLogger
 from .egress import IMessageEgress
 from .gateway_setup import ensure_gateway_resources
 from .gemini_cli_connector import GeminiCliConnector
@@ -117,7 +118,16 @@ class RelayDaemon:
     def __init__(self, settings: RelaySettings):
         self.settings = settings
         self._ensure_gateway_resources()
-        self.store = SQLiteStore(Path(settings.db_path))
+        csv_audit_logger = None
+        if settings.enable_csv_audit_log:
+            csv_path = Path(settings.csv_audit_log_path)
+            if not csv_path.is_absolute():
+                csv_path = Path(__file__).resolve().parents[2] / settings.csv_audit_log_path
+            csv_audit_logger = CsvAuditLogger(
+                path=csv_path,
+                include_headers_if_missing=settings.csv_audit_include_headers_if_missing,
+            )
+        self.store = SQLiteStore(Path(settings.db_path), csv_audit_logger=csv_audit_logger)
         self.store.bootstrap()
         self.policy = PolicyEngine(settings)
         self.ingress = IMessageIngress(
@@ -751,9 +761,22 @@ class RelayDaemon:
                     self._last_rowid = max(int(msg.id), self._last_rowid or 0)
                     if msg.is_from_me:
                         continue
-                    if not msg.text.strip():
+                    has_attachments = bool((msg.context or {}).get("attachments"))
+                    if not msg.text.strip() and not has_attachments:
                         logger.info("Ignoring empty inbound rowid=%s sender=%s", msg.id, msg.sender)
                         continue
+                    if not msg.text.strip() and has_attachments:
+                        msg.text = "analyze attached files"
+                        if getattr(self.settings, "require_chat_prefix", False):
+                            chat_prefix = (getattr(self.settings, "chat_prefix", "relay:") or "relay:").strip()
+                            msg.text = f"{chat_prefix} {msg.text}"
+                        msg.context["synthetic_text_reason"] = "attachment_only"
+                        logger.info(
+                            "Synthesized text for attachment-only inbound rowid=%s sender=%s text=%r",
+                            msg.id,
+                            msg.sender,
+                            msg.text,
+                        )
                     if self._consume_restart_echo_suppress(msg.sender, msg.text):
                         logger.info("Ignoring restart confirmation echo from %s (rowid=%s)", msg.sender, msg.id)
                         continue

@@ -120,3 +120,47 @@ def test_multiple_attachments_all_listed():
     assert "file1.txt" in prompt
     assert "image.png" in prompt
     assert "status=missing_file" in prompt
+
+
+def test_empty_text_with_attachments_is_auto_routed_to_chat(tmp_path):
+    file_path = tmp_path / "note.txt"
+    file_path.write_text("hello from file", encoding="utf-8")
+
+    orch = RelayOrchestrator(
+        connector=FakeConnector(),
+        egress=FakeEgress(),
+        store=FakeStore(),
+        allowed_workspaces=["/workspace/default"],
+        default_workspace="/workspace/default",
+        require_chat_prefix=True,
+        chat_prefix="relay:",
+        enable_attachments=True,
+        attachment_processor=AttachmentProcessor(),
+    )
+
+    msg = InboundMessage(
+        id="m-empty-with-att",
+        sender="+15551234567",
+        text="",
+        received_at="2026-02-17T12:00:00Z",
+        is_from_me=False,
+        context={
+            "attachments": [
+                {
+                    "filename": "note.txt",
+                    "mime_type": "text/plain",
+                    "path": str(file_path),
+                    "size_bytes": "64",
+                }
+            ]
+        },
+    )
+
+    result = orch.handle_message(msg)
+
+    assert result.kind is CommandKind.CHAT
+    assert msg.text.startswith("relay:")
+    assert orch.connector.turns
+    _, prompt = orch.connector.turns[0]
+    assert "Attached files (processed):" in prompt
+    assert "note.txt" in prompt

@@ -1,19 +1,24 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .models import ApprovalStatus, RunState
 
+logger = logging.getLogger("apple_flow.store")
+
 
 class SQLiteStore:
     """Thread-safe SQLite storage with connection caching."""
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, csv_audit_logger: Any | None = None):
         self.db_path = Path(db_path)
+        self.csv_audit_logger = csv_audit_logger
         self._conn: sqlite3.Connection | None = None
         self._lock = threading.Lock()
 
@@ -321,6 +326,7 @@ class SQLiteStore:
             return cursor.rowcount > 0
 
     def create_event(self, event_id: str, run_id: str, step: str, event_type: str, payload: dict[str, Any]) -> None:
+        created_at = datetime.now(UTC).isoformat()
         conn = self._connect()
         with self._lock:
             conn.execute(
@@ -335,6 +341,33 @@ class SQLiteStore:
                 (run_id,),
             )
             conn.commit()
+
+        if self.csv_audit_logger is not None:
+            try:
+                run = self.get_run(run_id) or {}
+                payload_json = json.dumps(payload)
+                source_context = self.get_run_source_context(run_id) or {}
+                self.csv_audit_logger.append_event(
+                    {
+                        "created_at": created_at,
+                        "event_id": event_id,
+                        "run_id": run_id,
+                        "step": step,
+                        "event_type": event_type,
+                        "channel": payload.get("channel", source_context.get("channel", "")),
+                        "sender": payload.get("sender", run.get("sender", "")),
+                        "workspace": payload.get("workspace", run.get("cwd", "")),
+                        "connector": payload.get("connector", ""),
+                        "attempt": payload.get("attempt", ""),
+                        "status": payload.get("status", ""),
+                        "duration_ms": payload.get("duration_ms", ""),
+                        "snippet": payload.get("snippet", ""),
+                        "payload_json": payload_json,
+                    }
+                )
+            except Exception as exc:
+                # CSV analytics mirror is best-effort; SQLite event insert remains canonical.
+                logger.warning("Failed to mirror event %s to CSV audit log: %s", event_id, exc)
 
     def list_events(self, limit: int = 200) -> list[dict[str, Any]]:
         conn = self._connect()

@@ -23,7 +23,10 @@ def _mock_applescript_output(events):
     result.returncode = 0
     lines = []
     for evt in events:
-        lines.append(f"{evt['id']}\t{evt['summary']}\t{evt['description']}\t{evt['start_date']}")
+        lines.append(
+            f"{evt['id']}\t{evt['summary']}\t{evt['description']}\t{evt['start_date']}\t"
+            f"{evt.get('url', '')}\t{evt.get('attachments', '')}"
+        )
     result.stdout = "\n".join(lines)
     result.stderr = ""
     return result
@@ -175,6 +178,41 @@ def test_parse_tab_delimited():
     assert results[0]["summary"] == "Summary 1"
     assert results[0]["description"] == "Desc 1"
     assert results[0]["start_date"] == "2026-02-17"
+
+
+def test_parse_tab_delimited_includes_url_and_attachments():
+    output = "evt1\tSummary 1\tDesc 1\t2026-02-17\thttps://example.com\t/tmp/a.txt|||/tmp/b.pdf"
+    results = AppleCalendarIngress._parse_tab_delimited(output)
+    assert len(results) == 1
+    assert results[0]["url"] == "https://example.com"
+    assert results[0]["attachments"] == "/tmp/a.txt|||/tmp/b.pdf"
+
+
+@patch("apple_flow.calendar_ingress.subprocess.run")
+def test_fetch_includes_event_url_and_attachments_in_context(mock_run):
+    events = [
+        {
+            "id": "evt1",
+            "summary": "Deploy",
+            "description": "Details",
+            "start_date": "2026-02-17T10:00:00Z",
+            "url": "https://example.com/runbook",
+            "attachments": "/tmp/runbook.txt|||/tmp/screenshot.png",
+        },
+    ]
+    mock_run.return_value = _mock_applescript_output(events)
+
+    ingress = _make_ingress(auto_approve=False)
+    messages = ingress.fetch_new()
+
+    assert len(messages) == 1
+    context = messages[0].context
+    assert context["event_url"] == "https://example.com/runbook"
+    assert len(context["attachments"]) == 2
+    assert context["attachments"][0]["filename"] == "runbook.txt"
+    assert context["attachments"][0]["mime_type"] == "text/plain"
+    assert context["attachments"][1]["filename"] == "screenshot.png"
+    assert context["attachments"][1]["mime_type"] == "image/png"
 
 
 # --- Trigger Tag Tests ---

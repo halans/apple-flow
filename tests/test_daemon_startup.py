@@ -584,6 +584,77 @@ async def test_status_command_fastlane_bypasses_busy_concurrency_semaphore(tmp_p
     assert any("No pending approvals." in body for _, body in sent)
 
 
+@pytest.mark.asyncio
+async def test_imessage_attachment_only_message_is_dispatched_with_synthesized_text(tmp_path):
+    daemon = RelayDaemon.__new__(RelayDaemon)
+    daemon._shutdown_requested = False
+    daemon._concurrency_sem = asyncio.Semaphore(2)
+    daemon._last_rowid = None
+    daemon._startup_time = datetime.now(UTC)
+    daemon._last_messages_db_error_at = 0.0
+    daemon._last_state_db_error_at = 0.0
+
+    chat_db = tmp_path / "chat.db"
+    chat_db.write_text("", encoding="utf-8")
+
+    inbound = InboundMessage(
+        id="12",
+        sender="+15551234567",
+        text="",
+        received_at="2026-02-17T12:00:00Z",
+        is_from_me=False,
+        context={
+            "attachments": [
+                {
+                    "filename": "image.png",
+                    "mime_type": "image/png",
+                    "path": "/tmp/image.png",
+                    "size_bytes": "1024",
+                }
+            ]
+        },
+    )
+
+    daemon.settings = SimpleNamespace(
+        allowed_senders=["+15551234567"],
+        only_poll_allowed_senders=True,
+        poll_interval_seconds=0,
+        messages_db_path=chat_db,
+        startup_catchup_window_seconds=0,
+        notify_blocked_senders=False,
+        notify_rate_limited_senders=False,
+        require_chat_prefix=True,
+        chat_prefix="relay:",
+    )
+    daemon.ingress = SimpleNamespace(fetch_new=lambda **kwargs: [inbound])
+    daemon.policy = SimpleNamespace(
+        is_sender_allowed=lambda sender: True,
+        is_under_rate_limit=lambda sender, now: True,
+    )
+    daemon.store = SimpleNamespace(
+        set_state=lambda key, value: None,
+        get_state=lambda key: None,
+    )
+    daemon.egress = SimpleNamespace(
+        was_recent_outbound=lambda sender, text: False,
+        send=lambda recipient, text: None,
+    )
+
+    seen_text: dict[str, str] = {}
+
+    class _CaptureOrchestrator:
+        def handle_message(self, msg):
+            seen_text["value"] = msg.text
+            daemon._shutdown_requested = True
+            return SimpleNamespace(kind=CommandKind.CHAT, response="ok", run_id=None)
+
+    daemon.orchestrator = _CaptureOrchestrator()
+
+    await daemon._poll_imessage_loop()
+    assert seen_text["value"] == "relay: analyze attached files"
+    assert inbound.context.get("synthetic_text_reason") == "attachment_only"
+
+
 def test_consume_restart_echo_suppress_matches_and_clears():
     daemon = RelayDaemon.__new__(RelayDaemon)
     marker_store = {

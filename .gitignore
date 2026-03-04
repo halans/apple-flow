@@ -69,3 +69,6 @@ agent-office/20_projects/workspace-dashboard/*
 apps/macos/AppleFlowApp/.build/
 apps/macos/AppleFlowApp/.swiftpm/
 apps/macos/AppleFlowApp/DerivedData/
+
+# Team packages
+/team-packages/

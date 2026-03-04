@@ -233,6 +233,14 @@ class RelaySettings(BaseSettings):
     supabase_service_key: str = ""
     office_sync_interval_seconds: float = 3600.0
 
+    # CSV audit logging (analytics-friendly mirror of structured events)
+    enable_csv_audit_log: bool = True
+    csv_audit_log_path: str = "agent-office/90_logs/events.csv"
+    csv_audit_include_headers_if_missing: bool = True
+
+    # Markdown automation log mirror (human-readable, optional)
+    enable_markdown_automation_log: bool = False
+
     # Weekly review
     companion_weekly_review_day: str = "sunday"
     companion_weekly_review_time: str = "20:00"
@@ -267,6 +275,9 @@ class RelaySettings(BaseSettings):
         "memory_v2_shadow_mode",
         "memory_v2_migrate_on_start",
         "memory_v2_include_legacy_fallback",
+        "enable_csv_audit_log",
+        "csv_audit_include_headers_if_missing",
+        "enable_markdown_automation_log",
         mode="before",
     )
     @classmethod

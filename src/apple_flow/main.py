@@ -9,6 +9,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from .config import RelaySettings
+from .csv_audit import CsvAuditLogger
 from .models import InboundMessage
 from .store import SQLiteStore
 
@@ -39,7 +40,19 @@ def _make_auth_dependency(token: str):
 
 def build_app(store: Any | None = None) -> FastAPI:
     settings = RelaySettings()
-    active_store = store if store is not None else SQLiteStore(Path(settings.db_path))
+    if store is not None:
+        active_store = store
+    else:
+        csv_audit_logger = None
+        if settings.enable_csv_audit_log:
+            csv_path = Path(settings.csv_audit_log_path)
+            if not csv_path.is_absolute():
+                csv_path = Path(__file__).resolve().parents[2] / settings.csv_audit_log_path
+            csv_audit_logger = CsvAuditLogger(
+                path=csv_path,
+                include_headers_if_missing=settings.csv_audit_include_headers_if_missing,
+            )
+        active_store = SQLiteStore(Path(settings.db_path), csv_audit_logger=csv_audit_logger)
     if hasattr(active_store, "bootstrap"):
         active_store.bootstrap()
 

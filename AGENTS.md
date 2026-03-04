@@ -247,6 +247,12 @@ Connector-specific settings (CLI binary path, model, context window, etc.) are d
 
 Apple Mail, Reminders, Notes, Calendar, Companion, Memory, Follow-Up Scheduler, and Ambient Scanner each have their own config sections. All are disabled by default (opt-in via `.env`).
 
+CSV audit logging controls are configured via:
+- `apple_flow_enable_csv_audit_log` — mirror `events` table writes to append-only CSV (default: true)
+- `apple_flow_csv_audit_log_path` — CSV destination path (default: `agent-office/90_logs/events.csv`)
+- `apple_flow_csv_audit_include_headers_if_missing` — auto-write CSV headers for new/empty files (default: true)
+- `apple_flow_enable_markdown_automation_log` — companion markdown log mirror (default: false)
+
 Attachment extraction controls are configured via:
 - `apple_flow_enable_attachments`
 - `apple_flow_max_attachment_size_mb`

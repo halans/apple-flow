@@ -144,6 +144,29 @@ def test_progress_sends_updates_to_sender():
     assert len(progress_messages) > 0
 
 
+def test_connector_lifecycle_events_recorded():
+    orch = _make_orchestrator(enable_streaming=True, progress_interval=0.0)
+
+    msg = InboundMessage(
+        id="m20", sender="+15551234567", text="task: deploy code",
+        received_at="2026-02-17T12:00:00Z", is_from_me=False,
+    )
+    result = orch.handle_message(msg)
+    approve_msg = InboundMessage(
+        id="m21", sender="+15551234567", text=f"approve {result.approval_request_id}",
+        received_at="2026-02-17T12:01:00Z", is_from_me=False,
+    )
+    orch.handle_message(approve_msg)
+
+    events = orch.store.events
+    started = [evt for evt in events if evt.get("event_type") == "connector_started"]
+    completed = [evt for evt in events if evt.get("event_type") == "connector_completed"]
+    assert started
+    assert completed
+    assert started[0]["payload"].get("connector")
+    assert completed[0]["payload"].get("duration_ms") is not None
+
+
 def test_heartbeat_reports_no_streamed_output_detail():
     orch = RelayOrchestrator(
         connector=SilentStreamingConnector(),

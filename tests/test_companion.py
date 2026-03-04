@@ -31,6 +31,7 @@ def _make_config(**overrides):
         companion_enable_daily_digest=False,
         companion_digest_time="08:00",
         enable_companion=True,
+        enable_markdown_automation_log=False,
         companion_weekly_review_day="sunday",
         companion_weekly_review_time="20:00",
         enable_memory=False,
@@ -655,18 +656,27 @@ class TestOfficeLogging:
         log_dir.mkdir()
         log_file = log_dir / "automation-log.md"
         log_file.write_text("# Automation Log\n\n## Runs\n")
-        comp = _make_companion(office_path=tmp_path)
+        comp = _make_companion(
+            office_path=tmp_path,
+            config=_make_config(enable_markdown_automation_log=True),
+        )
         comp._log_to_office("observation", ["test obs"], "test message")
         content = log_file.read_text()
         assert "companion" in content
         assert "observation" in content
 
     def test_log_no_crash_when_no_office(self):
-        comp = _make_companion(office_path=None)
+        comp = _make_companion(
+            office_path=None,
+            config=_make_config(enable_markdown_automation_log=True),
+        )
         comp._log_to_office("test", [], "msg")  # Should not crash
 
     def test_log_no_crash_when_log_missing(self, tmp_path):
-        comp = _make_companion(office_path=tmp_path)
+        comp = _make_companion(
+            office_path=tmp_path,
+            config=_make_config(enable_markdown_automation_log=True),
+        )
         comp._log_to_office("test", [], "msg")
 
     def test_log_multiple_entries(self, tmp_path):
@@ -674,13 +684,26 @@ class TestOfficeLogging:
         log_dir.mkdir()
         log_file = log_dir / "automation-log.md"
         log_file.write_text("# Log\n")
-        comp = _make_companion(office_path=tmp_path)
+        comp = _make_companion(
+            office_path=tmp_path,
+            config=_make_config(enable_markdown_automation_log=True),
+        )
         comp._log_to_office("first", ["a"], "msg1")
         comp._log_to_office("second", ["b", "c"], "msg2")
         content = log_file.read_text()
         assert "first" in content
         assert "second" in content
         assert "2 obs" in content
+
+    def test_log_disabled_by_default(self, tmp_path):
+        log_dir = tmp_path / "90_logs"
+        log_dir.mkdir()
+        log_file = log_dir / "automation-log.md"
+        original = "# Automation Log\n\n## Runs\n"
+        log_file.write_text(original)
+        comp = _make_companion(office_path=tmp_path)
+        comp._log_to_office("observation", ["test obs"], "test message")
+        assert log_file.read_text() == original
 
 
 # ------------------------------------------------------------------
@@ -816,6 +839,25 @@ class TestCheckAndNotifyTelemetry:
         comp = _make_companion(store=store)
         comp._check_and_notify()
         assert store.get_state("companion_last_skip_reason") == "muted"
+
+    def test_skip_outcome_appends_to_automation_log(self, tmp_path):
+        """Skip outcomes should still be written to automation-log.md."""
+        (tmp_path / "90_logs").mkdir()
+        log_file = tmp_path / "90_logs" / "automation-log.md"
+        log_file.write_text("# Automation Log\n\n## Runs\n")
+
+        store = FakeStore()
+        comp = _make_companion(
+            store=store,
+            office_path=tmp_path,
+            config=_make_config(enable_markdown_automation_log=True),
+        )
+        with patch.object(comp, "_is_quiet_hours", return_value=True):
+            comp._check_and_notify()
+
+        content = log_file.read_text()
+        assert "observation_skip" in content
+        assert "quiet_hours" in content
 
     def test_telemetry_last_sent_at_written_on_message(self):
         """companion_last_sent_at is written when a message is sent."""

@@ -157,10 +157,21 @@ class RelayOrchestrator:
         if not inserted:
             return OrchestrationResult(kind=CommandKind.STATUS, response="duplicate")
 
+        self._prepare_attachment_context(message)
         raw_text = message.text.strip()
         if not raw_text:
-            return OrchestrationResult(kind=CommandKind.CHAT, response="ignored_empty")
-        self._prepare_attachment_context(message)
+            if self.enable_attachments and (
+                message.context.get("attachments") or message.context.get("attachment_prompt_block")
+            ):
+                synthetic = "analyze attached files"
+                if self.require_chat_prefix:
+                    chat_prefix = self.chat_prefix or "relay:"
+                    synthetic = f"{chat_prefix} {synthetic}"
+                message.text = synthetic
+                raw_text = synthetic
+                logger.info("Synthesized attachment-only prompt for sender=%s message_id=%s", message.sender, message.id)
+            else:
+                return OrchestrationResult(kind=CommandKind.CHAT, response="ignored_empty")
 
         command = parse_command(raw_text)
         if command.kind is CommandKind.CHAT and self.require_chat_prefix:
@@ -1366,10 +1377,24 @@ class RelayOrchestrator:
 
     def _create_event(self, run_id: str, step: str, event_type: str, payload: dict[str, Any]) -> None:
         if hasattr(self.store, "create_event"):
+            event_payload = dict(payload or {})
+            source_context = self.store.get_run_source_context(run_id) if hasattr(self.store, "get_run_source_context") else {}
+            run = self.store.get_run(run_id) if hasattr(self.store, "get_run") else {}
+            if isinstance(source_context, dict):
+                channel = source_context.get("channel")
+                if channel and "channel" not in event_payload:
+                    event_payload["channel"] = channel
+            if isinstance(run, dict):
+                sender = run.get("sender")
+                workspace = run.get("cwd")
+                if sender and "sender" not in event_payload:
+                    event_payload["sender"] = sender
+                if workspace and "workspace" not in event_payload:
+                    event_payload["workspace"] = workspace
             self.store.create_event(
                 event_id=f"evt_{uuid4().hex[:12]}",
                 run_id=run_id,
                 step=step,
                 event_type=event_type,
-                payload=payload,
+                payload=event_payload,
             )
