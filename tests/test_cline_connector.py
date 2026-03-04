@@ -450,3 +450,22 @@ def test_run_turn_streaming_error_falls_back_to_run_turn():
             response = connector.run_turn_streaming("+15551234567", "test")
             mock_rt.assert_called_once()
             assert response == "fallback"
+
+
+def test_run_turn_streaming_timeout_terminates_process():
+    connector = ClineConnector(timeout=2.0, use_json=False)
+    mock_proc = Mock()
+    mock_proc.pid = 12345
+    mock_proc.stderr = Mock()
+
+    with (
+        patch("subprocess.Popen", return_value=mock_proc),
+        patch(
+            "apple_flow.cline_connector.capture_subprocess_streams",
+            side_effect=subprocess.TimeoutExpired("cline", 2.0),
+        ),
+        patch.object(connector._processes, "terminate") as mock_terminate,
+    ):
+        response = connector.run_turn_streaming("+15551234567", "test")
+        assert "timed out" in response.lower()
+        mock_terminate.assert_called_once_with(mock_proc)

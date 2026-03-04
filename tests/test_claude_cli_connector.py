@@ -304,3 +304,22 @@ def test_run_turn_streaming_no_model_flag_when_empty():
 
         args, _ = mock_popen.call_args
         assert "--model" not in args[0]
+
+
+def test_run_turn_streaming_timeout_terminates_process():
+    connector = ClaudeCliConnector(timeout=2.0)
+    mock_proc = Mock()
+    mock_proc.pid = 12345
+    mock_proc.stderr = Mock()
+
+    with (
+        patch("subprocess.Popen", return_value=mock_proc),
+        patch(
+            "apple_flow.claude_cli_connector.capture_subprocess_streams",
+            side_effect=subprocess.TimeoutExpired("claude", 2.0),
+        ),
+        patch.object(connector._processes, "terminate") as mock_terminate,
+    ):
+        response = connector.run_turn_streaming("+15551234567", "test prompt")
+        assert "timed out" in response.lower()
+        mock_terminate.assert_called_once_with(mock_proc)

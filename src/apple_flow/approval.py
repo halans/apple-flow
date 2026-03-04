@@ -186,6 +186,14 @@ class ApprovalHandler:
             self._safe_send(sender, response)
             return OrchestrationResult(kind=kind, response=response)
 
+        source_context = self.store.get_run_source_context(approval["run_id"]) or {}
+        egress_context = self._egress_context_from_source_context(source_context)
+        self._notify_source_channel_approval(
+            source_context=source_context,
+            request_id=request_id,
+            run_id=approval["run_id"],
+        )
+
         attempt = self._next_attempt(approval["run_id"])
         if self.run_executor is not None:
             self.run_executor.enqueue(
@@ -202,7 +210,7 @@ class ApprovalHandler:
                 f"(run `{approval['run_id']}`, attempt {attempt}/{self.max_resume_attempts}). "
                 f"Send `status {approval['run_id']}` for progress."
             )
-            self._safe_send(sender, queued)
+            self._safe_send(sender, queued, context=egress_context)
             self._log(kind.value, sender, run.get("intent", ""), queued)
             return OrchestrationResult(kind=kind, run_id=approval["run_id"], response=queued)
 
@@ -806,6 +814,29 @@ class ApprovalHandler:
                     self.calendar_egress.annotate_event(event_id, f"\n\n[Apple Flow Result]\n{result}")
         except Exception as exc:
             logger.warning("Post-execution cleanup failed for channel=%s: %s", channel, exc)
+
+    def _notify_source_channel_approval(
+        self,
+        *,
+        source_context: dict[str, Any],
+        request_id: str,
+        run_id: str,
+    ) -> None:
+        channel = source_context.get("channel")
+        if channel != "notes" or not self.notes_egress:
+            return
+
+        msg = (
+            f"[Apple Flow] ✅ Approved in iMessage ({request_id}). "
+            f"Execution started for run {run_id}."
+        )
+
+        try:
+            note_id = source_context.get("note_id")
+            if note_id and hasattr(self.notes_egress, "append_result"):
+                self.notes_egress.append_result(note_id, msg)
+        except Exception as exc:
+            logger.warning("Failed to write approval breadcrumb for channel=%s: %s", channel, exc)
 
     def _log(self, kind: str, sender: str, request: str, response: str) -> None:
         log_to_notes(self.log_notes_egress, self.notes_log_folder_name, kind, sender, request, response)

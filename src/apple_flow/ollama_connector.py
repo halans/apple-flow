@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import threading
 from pathlib import Path
@@ -38,6 +39,7 @@ class OllamaConnector:
         max_tool_iterations: int = 8,
         max_tool_output_chars: int = 12000,
         allowed_workspaces: list[str] | None = None,
+        enable_thinking: bool = False,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model.strip() or "qwen3.5:4b"
@@ -48,6 +50,7 @@ class OllamaConnector:
         self.system_prompt = system_prompt.strip()
         self.num_ctx = int(num_ctx)
         self.temperature = float(temperature)
+        self.enable_thinking = bool(enable_thinking)
         self.auto_pull_model = bool(auto_pull_model)
         self.tool_timeout_seconds = float(tool_timeout_seconds)
         self.max_tool_iterations = max(1, int(max_tool_iterations))
@@ -156,7 +159,7 @@ class OllamaConnector:
                 return response, messages
 
             message = response.get("message") or {}
-            content = str(message.get("content") or "").strip()
+            content = self._strip_thinking(str(message.get("content") or ""))
             tool_calls = self._extract_tool_calls(message)
 
             if not allow_tools or not tool_calls:
@@ -197,8 +200,11 @@ class OllamaConnector:
             "options": {
                 "num_ctx": self.num_ctx,
                 "temperature": self.temperature,
+                "think": self.enable_thinking,
             },
         }
+        if not self.enable_thinking:
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         if allow_tools:
             payload["tools"] = self._tool_schemas()
 
@@ -276,6 +282,12 @@ class OllamaConnector:
             except Exception:
                 logger.exception("Ollama auto-pull failed for model=%s", model)
                 return False
+
+    @staticmethod
+    def _strip_thinking(text: str) -> str:
+        """Remove <think>...</think> blocks emitted by Qwen3-series models."""
+        stripped = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        return stripped.strip()
 
     @staticmethod
     def _is_missing_model_response(status_code: int, body: str) -> bool:

@@ -7,6 +7,7 @@ from typing import Any
 
 from .apple_tools import TOOLS_CONTEXT
 from .process_registry import ManagedProcessRegistry
+from .streaming_subprocess import capture_subprocess_streams
 
 logger = logging.getLogger("apple_flow.kilo_cli_connector")
 
@@ -205,38 +206,19 @@ class KiloCliConnector:
             )
             self._processes.register(sender, proc)
 
-            output_lines: list[str] = []
+            capture = capture_subprocess_streams(
+                proc,
+                timeout=self.timeout,
+                on_stdout_line=on_progress,
+                stdin_text=full_prompt,
+            )
 
-            # Since we're using stdin, we need to send the full_prompt first
-            # but for streaming, Popen.stdin might be tricky if we want to pipe input and then read output
-            # Communicate is usually better for piping input, but it buffers.
-            # We'll use a thread to write to stdin and the main thread to read stdout.
-            def _write_input():
-                try:
-                    assert proc is not None
-                    assert proc.stdin is not None
-                    proc.stdin.write(full_prompt)
-                    proc.stdin.close()
-                except Exception:
-                    pass
+            if capture.returncode != 0:
+                error_msg = capture.stderr.strip() or "Unknown error"
+                logger.error("Kilo run (streaming) failed: rc=%d", capture.returncode)
+                return f"Error: Kilo execution failed (exit code {capture.returncode}). {error_msg}"
 
-            writer_thread = threading.Thread(target=_write_input, daemon=True)
-            writer_thread.start()
-
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                output_lines.append(line)
-                if on_progress:
-                    on_progress(line)
-
-            proc.wait(timeout=self.timeout)
-
-            if proc.returncode != 0:
-                error_msg = proc.stderr.read() if proc.stderr else "Unknown error"
-                logger.error("Kilo run (streaming) failed: rc=%d", proc.returncode)
-                return f"Error: Kilo execution failed (exit code {proc.returncode}). {error_msg}"
-
-            response = "".join(output_lines).strip()
+            response = capture.stdout.strip()
             if not response:
                 response = "No response generated."
 

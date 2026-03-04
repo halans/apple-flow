@@ -223,6 +223,7 @@ class RelayDaemon:
                 num_ctx=settings.ollama_num_ctx,
                 temperature=settings.ollama_temperature,
                 auto_pull_model=settings.ollama_auto_pull_model,
+                enable_thinking=settings.ollama_enable_thinking,
                 tool_timeout_seconds=settings.ollama_tool_timeout_seconds,
                 max_tool_iterations=settings.ollama_max_tool_iterations,
                 max_tool_output_chars=settings.ollama_max_tool_output_chars,
@@ -241,16 +242,16 @@ class RelayDaemon:
 
         # Read SOUL.md for companion identity
         self._soul_prompt = ""
-        soul_path = Path(settings.soul_file)
-        if not soul_path.is_absolute():
+        soul_path = Path(settings.soul_file) if settings.soul_file.strip() else None
+        if soul_path and not soul_path.is_absolute():
             soul_path = Path(__file__).resolve().parents[2] / settings.soul_file
-        if soul_path.exists():
+        if soul_path and soul_path.is_file():
             try:
                 self._soul_prompt = soul_path.read_text(encoding="utf-8").strip()
                 logger.info("Loaded SOUL.md from %s (%d chars)", soul_path, len(self._soul_prompt))
             except Exception as exc:
                 logger.warning("Failed to read SOUL.md at %s: %s", soul_path, exc)
-        else:
+        elif soul_path:
             logger.info("SOUL.md not found at %s — using personality_prompt fallback", soul_path)
 
         # Inject soul prompt into connector when supported by connector implementation.

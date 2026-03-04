@@ -456,6 +456,71 @@ def test_note_task_moves_to_archive_after_approval():
     assert "[Apple Flow Result]" in moved["result_text"]
 
 
+def test_note_task_writes_approval_breadcrumb_before_completion():
+    class FakeNotesEgress:
+        def __init__(self):
+            self.appended = []
+            self.moved_notes = []
+
+        def append_result(self, note_id, result_text):
+            self.appended.append({"note_id": note_id, "result_text": result_text})
+            return True
+
+        def move_to_archive(self, note_id, result_text, source_folder_name, archive_subfolder_name):
+            self.moved_notes.append({
+                "note_id": note_id,
+                "result_text": result_text,
+                "source_folder_name": source_folder_name,
+                "archive_subfolder_name": archive_subfolder_name,
+            })
+            return True
+
+    connector = FakeConnector()
+    egress = FakeEgress()
+    store = FakeStore()
+    notes_egress = FakeNotesEgress()
+
+    orchestrator = RelayOrchestrator(
+        connector=connector,
+        egress=egress,
+        store=store,
+        allowed_workspaces=["/Users/cypher/Public/code/codex-flow"],
+        default_workspace="/Users/cypher/Public/code/codex-flow",
+        notes_egress=notes_egress,
+        notes_archive_folder_name="codex-archive",
+    )
+
+    task_msg = InboundMessage(
+        id="note_task_approval_breadcrumb",
+        sender="+15551234567",
+        text="task: create test file",
+        received_at="2026-02-16T12:00:00Z",
+        is_from_me=False,
+        context={
+            "channel": "notes",
+            "note_id": "x-coredata://NOTE123",
+            "note_title": "Create test file",
+            "folder_name": "codex-task",
+        },
+    )
+    result = orchestrator.handle_message(task_msg)
+    request_id = result.approval_request_id
+    assert request_id is not None
+
+    approve_msg = InboundMessage(
+        id="approve_breadcrumb_1",
+        sender="+15551234567",
+        text=f"approve {request_id}",
+        received_at="2026-02-16T12:05:00Z",
+        is_from_me=False,
+    )
+    orchestrator.handle_message(approve_msg)
+
+    assert len(notes_egress.appended) == 1
+    assert notes_egress.appended[0]["note_id"] == "x-coredata://NOTE123"
+    assert "Approved in iMessage" in notes_egress.appended[0]["result_text"]
+
+
 def test_calendar_post_approval_annotates_event():
     """Regression: calendar_egress.annotate_event() must be called (not write_result)."""
     class FakeCalendarEgress:

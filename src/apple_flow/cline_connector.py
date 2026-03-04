@@ -6,6 +6,7 @@ import subprocess
 from typing import Any
 
 from .process_registry import ManagedProcessRegistry
+from .streaming_subprocess import capture_subprocess_streams
 
 logger = logging.getLogger("apple_flow.cline_connector")
 
@@ -283,30 +284,31 @@ class ClineConnector:
             )
             self._processes.register(sender, proc)
 
-            output_lines: list[str] = []
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                output_lines.append(line)
-                if on_progress:
-                    # For JSON mode, try to extract text for progress
-                    if self.use_json:
-                        try:
-                            obj = json.loads(line.strip())
-                            if obj.get("type") == "say" and obj.get("say") == "text":
-                                on_progress(obj.get("text", ""))
-                        except (json.JSONDecodeError, AttributeError):
-                            on_progress(line)
-                    else:
+            def _on_progress_line(line: str) -> None:
+                if not on_progress:
+                    return
+                if self.use_json:
+                    try:
+                        obj = json.loads(line.strip())
+                        if obj.get("type") == "say" and obj.get("say") == "text":
+                            on_progress(obj.get("text", ""))
+                    except (json.JSONDecodeError, AttributeError):
                         on_progress(line)
+                else:
+                    on_progress(line)
 
-            proc.wait(timeout=self.timeout)
+            capture = capture_subprocess_streams(
+                proc,
+                timeout=self.timeout,
+                on_stdout_line=_on_progress_line,
+            )
 
-            if proc.returncode != 0:
-                error_msg = proc.stderr.read() if proc.stderr else "Unknown error"
-                logger.error("Cline exec (streaming) failed: rc=%d", proc.returncode)
-                return f"Error: Cline execution failed (exit code {proc.returncode}). {error_msg}"
+            if capture.returncode != 0:
+                error_msg = capture.stderr.strip() or "Unknown error"
+                logger.error("Cline exec (streaming) failed: rc=%d", capture.returncode)
+                return f"Error: Cline execution failed (exit code {capture.returncode}). {error_msg}"
 
-            raw_output = "".join(output_lines)
+            raw_output = capture.stdout
             if self.use_json:
                 response = self._parse_json_output(raw_output)
             else:

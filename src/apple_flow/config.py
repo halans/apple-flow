@@ -69,8 +69,9 @@ class RelaySettings(BaseSettings):
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3.5:4b"
     ollama_context_window: int = 10
-    ollama_num_ctx: int = 32768
+    ollama_num_ctx: int = 4096
     ollama_temperature: float = 0.2
+    ollama_enable_thinking: bool = False
     ollama_auto_pull_model: bool = True
     ollama_tool_timeout_seconds: float = 120.0
     ollama_max_tool_iterations: int = 8

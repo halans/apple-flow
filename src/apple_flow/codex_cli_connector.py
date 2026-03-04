@@ -8,6 +8,7 @@ from typing import Any
 
 from .apple_tools import TOOLS_CONTEXT
 from .process_registry import ManagedProcessRegistry
+from .streaming_subprocess import capture_subprocess_streams
 
 logger = logging.getLogger("apple_flow.cli_connector")
 
@@ -220,21 +221,18 @@ class CodexCliConnector:
             )
             self._processes.register(sender, proc)
 
-            output_lines: list[str] = []
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                output_lines.append(line)
-                if on_progress:
-                    on_progress(line)
+            capture = capture_subprocess_streams(
+                proc,
+                timeout=self.timeout,
+                on_stdout_line=on_progress,
+            )
 
-            proc.wait(timeout=self.timeout)
+            if capture.returncode != 0:
+                error_msg = capture.stderr.strip() or "Unknown error"
+                logger.error("Codex exec (streaming) failed: rc=%d", capture.returncode)
+                return f"Error: Codex execution failed (exit code {capture.returncode}). {error_msg}"
 
-            if proc.returncode != 0:
-                error_msg = proc.stderr.read() if proc.stderr else "Unknown error"
-                logger.error("Codex exec (streaming) failed: rc=%d", proc.returncode)
-                return f"Error: Codex execution failed (exit code {proc.returncode}). {error_msg}"
-
-            response = "".join(output_lines).strip()
+            response = capture.stdout.strip()
             if not response:
                 response = "No response generated."
 

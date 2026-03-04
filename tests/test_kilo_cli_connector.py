@@ -161,5 +161,23 @@ def test_run_turn_streaming_success():
         assert response == "Response line 1\nline 2"
         assert len(progress_lines) == 3
         assert progress_lines[0] == "Response "
-        mock_proc.stdin.write.assert_called_once()
-        mock_proc.stdin.close.assert_called_once()
+
+
+def test_run_turn_streaming_timeout_terminates_process():
+    connector = KiloCliConnector(timeout=2.0)
+    mock_proc = Mock()
+    mock_proc.pid = 12345
+    mock_proc.stdin = Mock()
+    mock_proc.stderr = Mock()
+
+    with (
+        patch("subprocess.Popen", return_value=mock_proc),
+        patch(
+            "apple_flow.kilo_cli_connector.capture_subprocess_streams",
+            side_effect=subprocess.TimeoutExpired("kilo", 2.0),
+        ),
+        patch.object(connector._processes, "terminate") as mock_terminate,
+    ):
+        response = connector.run_turn_streaming("+15551234567", "test prompt")
+        assert "timed out" in response.lower()
+        mock_terminate.assert_called_once_with(mock_proc)
