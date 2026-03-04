@@ -14,6 +14,7 @@ from xml.etree import ElementTree as ET
 class ProcessedAttachment:
     filename: str
     mime_type: str
+    source_path: str
     status: str
     extracted_text: str = ""
     detail: str = ""
@@ -63,6 +64,7 @@ class AttachmentProcessor:
             {
                 "filename": item.filename,
                 "mime_type": item.mime_type,
+                "source_path": item.source_path,
                 "status": item.status,
                 "detail": item.detail,
             }
@@ -75,11 +77,16 @@ class AttachmentProcessor:
         mime = str(att.get("mime_type") or "application/octet-stream")
         path_str = str(att.get("path") or "").strip()
         if not path_str:
-            return ProcessedAttachment(filename=filename, mime_type=mime, status="missing_path")
+            return ProcessedAttachment(filename=filename, mime_type=mime, source_path="", status="missing_path")
 
         path = Path(path_str)
         if not path.exists() or not path.is_file():
-            return ProcessedAttachment(filename=filename, mime_type=mime, status="missing_file")
+            return ProcessedAttachment(
+                filename=filename,
+                mime_type=mime,
+                source_path=path_str,
+                status="missing_file",
+            )
 
         try:
             size_bytes = path.stat().st_size
@@ -87,17 +94,34 @@ class AttachmentProcessor:
             return ProcessedAttachment(
                 filename=filename,
                 mime_type=mime,
+                source_path=path_str,
                 status="read_failed",
                 detail=str(exc),
             )
         if size_bytes > self.max_attachment_size_bytes:
-            return ProcessedAttachment(filename=filename, mime_type=mime, status="skipped_size_limit")
+            return ProcessedAttachment(
+                filename=filename,
+                mime_type=mime,
+                source_path=path_str,
+                status="skipped_size_limit",
+            )
         if remaining_chars <= 0:
-            return ProcessedAttachment(filename=filename, mime_type=mime, status="skipped_total_text_limit")
+            return ProcessedAttachment(
+                filename=filename,
+                mime_type=mime,
+                source_path=path_str,
+                status="skipped_total_text_limit",
+            )
 
         extracted_text, status, detail = self._extract_text(path, mime)
         if not extracted_text:
-            return ProcessedAttachment(filename=filename, mime_type=mime, status=status, detail=detail)
+            return ProcessedAttachment(
+                filename=filename,
+                mime_type=mime,
+                source_path=path_str,
+                status=status,
+                detail=detail,
+            )
 
         extracted_text = self._sanitize_text(extracted_text)
         allowed = min(self.max_text_chars_per_file, remaining_chars)
@@ -107,6 +131,7 @@ class AttachmentProcessor:
         return ProcessedAttachment(
             filename=filename,
             mime_type=mime,
+            source_path=path_str,
             status=status,
             extracted_text=extracted_text,
             detail=detail,
@@ -339,8 +364,12 @@ class AttachmentProcessor:
         lines: list[str] = ["Attached files (processed):"]
         for item in processed:
             lines.append(f"- {item.filename} ({item.mime_type}) status={item.status}")
+            if item.source_path:
+                lines.append(f"  path: {item.source_path}")
             if item.detail:
                 lines.append(f"  detail: {item.detail[:160]}")
+            if item.status == "ocr_unavailable" and item.source_path:
+                lines.append("  hint: OCR unavailable locally; analyze this image directly from its file path if multimodal is available.")
             if item.extracted_text:
                 lines.append("  extracted_text:")
                 lines.append(f"  {item.extracted_text}")

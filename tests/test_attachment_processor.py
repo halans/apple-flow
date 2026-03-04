@@ -58,7 +58,10 @@ def test_image_reports_ocr_unavailable_without_tesseract(tmp_path, monkeypatch):
     )
 
     assert "status=ocr_unavailable" in block
+    assert f"path: {image_file}" in block
+    assert "analyze this image directly from its file path" in block
     assert metadata[0]["status"] == "ocr_unavailable"
+    assert metadata[0]["source_path"] == str(image_file)
 
 
 def test_missing_file_is_marked():

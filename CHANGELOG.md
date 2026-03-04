@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-03-03
+
+### Added
+- **Multimodal image fallback for iMessage attachments**: Attachment prompt blocks now include image source paths so multimodal-capable CLI providers can analyze images directly even when local OCR is unavailable.
+
+### Changed
+- **Attachment metadata enrichment**: `AttachmentProcessor` now returns `source_path` in attachment processing metadata for downstream routing/inspection.
+- **OCR-unavailable guidance**: When Tesseract is missing, processed attachment output now includes an explicit multimodal fallback hint instead of only reporting OCR unavailability.
+
 ## [0.4.0] - 2026-03-02
 
 ### Added
@@ -174,6 +183,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| 0.4.1 | 2026-03-03 | iMessage image multimodal fallback via attachment source paths; no Tesseract requirement for multimodal providers |
 | 0.4.0 | 2026-03-02 | Native Ollama connector, local Qwen support, and inbound attachment processing with safety limits/tests |
 | 0.3.1 | 2026-02-28 | Canonical memory v2 rollout (feature-flagged), shadow mode, maintenance, and docs/tests updates |
 | 0.3.0 | 2026-02-26 | Codex agent teams, Kilo connector, reliability/ops improvements |
@@ -183,7 +193,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/dkyazzentwatwa/apple-flow/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/dkyazzentwatwa/apple-flow/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/dkyazzentwatwa/apple-flow/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/dkyazzentwatwa/apple-flow/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/dkyazzentwatwa/apple-flow/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/dkyazzentwatwa/apple-flow/compare/v0.2.1...v0.3.0
