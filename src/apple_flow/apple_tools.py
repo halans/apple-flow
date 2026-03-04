@@ -743,6 +743,46 @@ def _resolve_markdown_image_source(raw_source: str, source_dir: Path | None) -> 
     return candidate.as_uri(), None
 
 
+def _absolutize_markdown_image_links(markdown_text: str, source_dir: Path | None) -> str:
+    """Rewrite relative markdown image links to absolute paths for stable merging."""
+    if source_dir is None:
+        return markdown_text
+
+    pattern = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+
+    def _replace(match: re.Match[str]) -> str:
+        alt = match.group(1)
+        raw_source = match.group(2).strip()
+        token = raw_source
+        remainder = ""
+
+        # Preserve optional title text: ![alt](path "title")
+        if " " in raw_source:
+            maybe_path, maybe_rest = raw_source.split(" ", 1)
+            if maybe_rest.strip().startswith(("'", '"')):
+                token = maybe_path
+                remainder = " " + maybe_rest
+
+        clean_token = token.strip().strip("<>")
+        if not clean_token:
+            return match.group(0)
+        if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", clean_token):
+            return match.group(0)
+
+        candidate = Path(clean_token).expanduser()
+        if candidate.is_absolute():
+            resolved = candidate.resolve()
+        else:
+            resolved = (source_dir / candidate).resolve()
+
+        resolved_text = resolved.as_posix()
+        if token.startswith("<") and token.endswith(">"):
+            resolved_text = f"<{resolved_text}>"
+        return f"![{alt}]({resolved_text}{remainder})"
+
+    return pattern.sub(_replace, markdown_text)
+
+
 def _inline_markdown_to_html(
     text: str,
     *,
@@ -1726,6 +1766,7 @@ def pages_update_sections(
     if not output_path:
         return {"ok": False, "error": "output path is required"}
 
+    base_source: Path | None = None
     base_from_stdin = base_input_path.strip() == "-"
     if base_from_stdin:
         base_markdown = sys.stdin.read()
@@ -1762,6 +1803,12 @@ def pages_update_sections(
     except OSError as exc:
         return {"ok": False, "error": f"failed to read updates file: {exc}"}
 
+    base_markdown = _absolutize_markdown_image_links(
+        base_markdown,
+        base_source.parent if base_source else None,
+    )
+    updates_markdown = _absolutize_markdown_image_links(updates_markdown, updates_source.parent)
+
     requested_sections: list[str] | None
     if isinstance(sections, str):
         requested_sections = [part.strip() for part in sections.split(",") if part.strip()] or None
@@ -1781,7 +1828,7 @@ def pages_update_sections(
     result = _render_pages_markdown(
         merged_markdown,
         source_label=f"{base_label} + {updates_source}",
-        source_path=updates_source,
+        source_path=base_source or updates_source,
         output_path=output_path,
         style=style,
         theme=theme,

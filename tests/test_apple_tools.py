@@ -649,6 +649,44 @@ class TestPagesUpdateSections:
         assert result["merge"]["applied_sections"] == ["Scope"]
         assert result["merge"]["appended_sections"] == ["Risks"]
 
+    def test_rewrites_relative_images_from_base_and_updates(self, tmp_path):
+        base_dir = tmp_path / "base"
+        updates_dir = tmp_path / "updates"
+        (base_dir / "images").mkdir(parents=True)
+        (updates_dir / "assets").mkdir(parents=True)
+        (base_dir / "images" / "base.png").write_bytes(b"base")
+        (updates_dir / "assets" / "update.png").write_bytes(b"update")
+
+        base = base_dir / "base.md"
+        base.write_text(
+            "# Overview\n\n![base](images/base.png)\n",
+            encoding="utf-8",
+        )
+        updates = updates_dir / "updates.md"
+        updates.write_text(
+            "## Addendum\n\n![update](assets/update.png)\n",
+            encoding="utf-8",
+        )
+        output = tmp_path / "merged.pages"
+
+        captured: dict[str, str] = {}
+
+        def _fake_render(markdown_text, **kwargs):
+            captured["markdown"] = markdown_text
+            return {"ok": True, "warnings": []}
+
+        with patch("apple_flow.apple_tools._render_pages_markdown", side_effect=_fake_render):
+            result = pages_update_sections(
+                str(base),
+                str(updates),
+                str(output),
+                overwrite=True,
+            )
+
+        assert result["ok"] is True
+        assert str((base_dir / "images" / "base.png").resolve()) in captured["markdown"]
+        assert str((updates_dir / "assets" / "update.png").resolve()) in captured["markdown"]
+
 
 class TestPagesTemplate:
     def test_creates_research_template(self, tmp_path):
