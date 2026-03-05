@@ -6,7 +6,7 @@ import re
 import subprocess
 import time
 
-from .utils import normalize_sender
+from .utils import normalize_echo_text, normalize_sender
 
 logger = logging.getLogger("apple_flow.egress")
 
@@ -24,6 +24,7 @@ class IMessageEgress:
         self.echo_window_seconds = echo_window_seconds
         self.suppress_duplicate_outbound_seconds = suppress_duplicate_outbound_seconds
         self._recent_fingerprints: dict[str, float] = {}
+        self._recent_normalized_texts: dict[tuple[str, str], float] = {}
 
     def _chunk(self, text: str) -> list[str]:
         if len(text) <= self.max_chunk_chars:
@@ -67,23 +68,54 @@ class IMessageEgress:
 
     def _gc_recent(self) -> None:
         now = time.time()
-        expired = [
+        expired_fingerprints = [
             fingerprint
             for fingerprint, ts in self._recent_fingerprints.items()
             if (now - ts) > self.echo_window_seconds
         ]
-        for fingerprint in expired:
+        for fingerprint in expired_fingerprints:
             self._recent_fingerprints.pop(fingerprint, None)
+        expired_texts = [
+            key
+            for key, ts in self._recent_normalized_texts.items()
+            if (now - ts) > self.echo_window_seconds
+        ]
+        for key in expired_texts:
+            self._recent_normalized_texts.pop(key, None)
 
     def was_recent_outbound(self, sender: str, text: str) -> bool:
         self._gc_recent()
-        return self._fingerprint(sender, text) in self._recent_fingerprints
+        if self._fingerprint(sender, text) in self._recent_fingerprints:
+            return True
+
+        normalized_sender = normalize_sender(sender)
+        normalized_text = normalize_echo_text(text)
+        if not normalized_text:
+            return False
+        if (normalized_sender, normalized_text) in self._recent_normalized_texts:
+            return True
+        # attributedBody fallback can drop leading chars or return mid-run fragments.
+        # Use containment only for long snippets to avoid false positives on short text.
+        if len(normalized_text) < 40:
+            return False
+        for (candidate_sender, candidate_text), _ in self._recent_normalized_texts.items():
+            if candidate_sender != normalized_sender:
+                continue
+            if normalized_text in candidate_text or candidate_text in normalized_text:
+                return True
+        return False
 
     def mark_outbound(self, recipient: str, text: str) -> None:
         self._gc_recent()
-        self._recent_fingerprints[self._fingerprint(recipient, text)] = time.time()
+        now = time.time()
+        self._recent_fingerprints[self._fingerprint(recipient, text)] = now
+        normalized_sender = normalize_sender(recipient)
+        normalized_text = normalize_echo_text(text)
+        if normalized_text:
+            self._recent_normalized_texts[(normalized_sender, normalized_text)] = now
 
     def send(self, recipient: str, text: str, context: dict | None = None) -> None:
+        self._gc_recent()
         outbound_fingerprint = self._fingerprint(recipient, text)
         last_ts = self._recent_fingerprints.get(outbound_fingerprint)
         if last_ts is not None and (time.time() - last_ts) <= self.suppress_duplicate_outbound_seconds:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import string
 from pathlib import Path
@@ -192,14 +193,20 @@ class IMessageIngress:
             s = value.strip()
             if not s:
                 return -10_000
-            token_penalty = sum(40 for token in metadata_tokens if token in s)
-            command_bonus = sum(120 for token in command_tokens if token in s.lower())
-            natural_bonus = 30 if any(ch.isspace() for ch in s) else 0
-            return len(s) + command_bonus + natural_bonus - token_penalty
+            lower = s.lower()
+            metadata_penalty = sum(180 for token in metadata_tokens if token.lower() in lower)
+            command_bonus = 25 if any(lower.startswith(token) for token in command_tokens) else 0
+            natural_bonus = 100 if any(ch.isspace() for ch in s) else 0
+            newline_bonus = 20 if "\n" in s else 0
+            alpha_chars = sum(1 for ch in s if ch.isalpha())
+            alpha_bonus = int((alpha_chars / max(len(s), 1)) * 120)
+            noise_penalty = sum(4 for ch in s if ch in "{}$\\")
+            return len(s) + natural_bonus + newline_bonus + alpha_bonus + command_bonus - metadata_penalty - noise_penalty
 
         candidate = max(runs, key=score).strip()
         if candidate.startswith("+") and len(candidate) > 3 and candidate[1].isalpha() and candidate[2].isalpha():
             candidate = candidate[2:]
+        candidate = re.sub(r"^\+{1,3}(?:\?|=|,)\s*", "", candidate)
         return candidate.strip()
 
     def _fetch_attachments(self, message_rowid: int) -> list[dict[str, str]]:

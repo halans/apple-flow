@@ -32,3 +32,30 @@ def test_fetch_new_falls_back_to_attributed_body_when_text_is_empty(tmp_path):
 
     assert len(rows) == 1
     assert rows[0].text == "relay: status"
+
+
+def test_decode_attributed_body_prefers_long_human_text_over_command_fragment():
+    short_command = "task: create project docs"
+    long_human = (
+        "this is a longer human-readable sentence about reviewing architecture "
+        "and testing behavior before deployment "
+    ) * 8
+    blob = (
+        b"\x04\x0bstreamtyped\x08NSString\x01\x95\x84\x01"
+        + short_command.encode("ascii")
+        + b"\x86\x84\x01\x95\x84\x01"
+        + long_human.encode("ascii")
+        + b"\x86\x84"
+    )
+
+    decoded = IMessageIngress._decode_attributed_body(blob)
+
+    assert decoded.startswith("this is a longer human-readable sentence")
+
+
+def test_decode_attributed_body_strips_common_artifact_prefix():
+    blob = b"\x04\x0bstreamtyped\x08NSString\x01\x95\x84\x01\x2b+?relay: status\x86\x84"
+
+    decoded = IMessageIngress._decode_attributed_body(blob)
+
+    assert decoded == "relay: status"
