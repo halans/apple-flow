@@ -2,160 +2,159 @@
 
 ## Supported Versions
 
-Apple Flow is currently in active development. Security updates are applied to the latest release only.
+Apple Flow is in active development, and security fixes are supported on the latest release only.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| latest  | ✅                 |
-| older   | ❌ (upgrade recommended) |
+| Version | Supported |
+| ------- | --------- |
+| latest release | ✅ |
+| older releases | ❌ (upgrade required) |
 
 ## Security Model
 
-Apple Flow is designed with **security-first principles** for local-first AI assistance on macOS.
+Apple Flow is local-first and ships with security-first defaults for message intake, workspace access, and mutating actions.
 
-### Core Security Features
+### Core Controls
 
-#### 1. Sender Allowlist
-- Only messages from `apple_flow_allowed_senders` are processed
-- All other senders are silently ignored (optional notification available)
-- Phone numbers should be in `+1...` format
+#### 1. Sender allowlist
+- Inbound processing is restricted to `apple_flow_allowed_senders`.
+- With `apple_flow_only_poll_allowed_senders=true` (default), filtering happens at query time.
+- Unknown senders are ignored.
 
-#### 2. Workspace Restrictions
-- AI can only access paths in `apple_flow_allowed_workspaces`
-- Path traversal attempts are blocked
-- Workspace aliases are resolved against the allowlist
+#### 2. Workspace restrictions
+- Agent work is restricted to `apple_flow_allowed_workspaces`.
+- Path validation blocks traversal outside allowed roots.
+- Workspace aliases resolve only to allowlisted paths.
 
-#### 3. Approval Workflow
-- **Mutating commands** (`task:`, `project:`) require explicit approval
-- Each approval has a unique ID and expiration time (default: 20 minutes)
-- Only the original requester can approve their own requests
-- Use `deny all` to cancel all pending approvals at once
+#### 3. Approval workflow for mutating actions
+- `task:` and `project:` require explicit approval.
+- Approvals expire after `apple_flow_approval_ttl_minutes` (default: `20`).
+- Only the original requester can approve or deny their own request.
+- `deny all` is available to clear pending approvals quickly.
 
-#### 4. Rate Limiting
-- Per-sender message rate limiting (default: 30/minute)
-- Prevents abuse and accidental spam
+#### 4. Per-sender rate limiting
+- Enforced by `apple_flow_max_messages_per_minute` (default: `30`).
+- Protects against spam and accidental runaway loops.
 
-#### 5. Read-Only iMessage Access
-- Messages database is opened in read-only mode (`mode=ro` URI)
-- No writes to the iMessage database
-- Full Disk Access is required but used safely
+#### 5. Read-only iMessage ingress
+- Messages DB is opened read-only (`mode=ro` and query-only behavior).
+- Apple Flow does not write to `chat.db`.
+- Full Disk Access is still required on macOS for the host process.
 
-#### 6. Stateless AI Execution
-- CLI connectors (`claude-cli`, `codex-cli`, `gemini-cli`, `cline`) spawn fresh processes per turn
-- No persistent state that could be corrupted
-- Conversation context is managed in-memory with configurable history
+#### 6. Connector process isolation
+- Supported connectors include `codex-cli`, `claude-cli`, `gemini-cli`, `kilo-cli`, `cline`, and `ollama`.
+- Connector invocations are isolated to reduce long-lived shared state risks.
+- Conversation/session state is managed by Apple Flow with explicit controls.
 
-#### 7. Admin API Authentication
-- Admin API requires a Bearer token when `apple_flow_admin_api_token` is set
-- All endpoints except `/health` are protected
-- Token is a shared secret configured in `.env` and never logged
+#### 7. Admin API authentication
+- If `apple_flow_admin_api_token` is set, Admin API routes (except `/health`) require a Bearer token.
+- Token values are shared secrets and should be rotated if exposed.
 
-#### 8. Echo Suppression
-- Outbound messages are fingerprinted to prevent echo loops
-- Configurable suppression window (default: 90 seconds)
+#### 8. Egress hardening
+- Duplicate/echo suppression fingerprints outbound responses.
+- AppleScript-bound strings are escaped on egress paths to reduce script injection risk.
 
-### Threat Model
+## Threat Model
 
-#### What Apple Flow Protects Against
+### In Scope: Threats Apple Flow Mitigates
 
 | Threat | Mitigation |
-|--------|------------|
-| Unauthorized senders | Sender allowlist verification |
-| Path traversal | Workspace path validation |
-| Unapproved file changes | Approval workflow with sender verification |
-| Message loops | Echo suppression + duplicate detection |
-| Rate abuse | Per-sender rate limiting |
-| Stale approvals | Approval TTL expiration |
-| State corruption | Stateless CLI execution |
-| Admin API abuse | Bearer token authentication |
-| AppleScript injection | String escaping on all Apple app egress paths |
+| ------ | ---------- |
+| Unauthorized sender actions | Sender allowlist + optional SQL-time filtering |
+| Path traversal / workspace escape | Allowlist path validation |
+| Unapproved mutating execution | Approval gate + requester verification |
+| Message echo loops | Duplicate suppression + fingerprinting |
+| Abuse via rapid message bursts | Per-sender rate limits |
+| Stale approvals being replayed | Approval TTL + status checks |
+| AppleScript string injection | Escaping in egress modules |
+| Admin endpoint misuse | Optional Bearer token auth |
 
-#### What Apple Flow Does NOT Protect Against
+### Out of Scope: Threats Not Fully Mitigated
 
 | Threat | Reason |
-|--------|--------|
-| Compromised macOS account | Apple Flow runs with user privileges |
-| Malicious AI model outputs | AI behavior depends on the model provider |
-| Physical device access | Local-first means data is on disk |
-| Network interception | No network traffic (local-only by default) |
-| Prompt injection via Apple apps | Mail/Notes/Reminders content is passed to the AI as-is |
+| ------ | ------ |
+| Compromised local macOS user account | Apple Flow runs with local user privileges |
+| Physical access to unlocked machine | Local data can be accessed by local user/session |
+| Malicious or incorrect model output | Depends on selected model/provider behavior |
+| Prompt injection from trusted app content | Mail/Notes/Reminders/Calendar text may be model input |
+| Network interception for remote providers | Connector traffic may leave host if non-local providers are used |
 
-### Data Handling
+## Data Handling
 
-- **All data stays local** — No telemetry, no cloud uploads
-- **iMessage database** — Read-only access, never modified
-- **SQLite state** — Stored in `~/.codex/relay.db`
-- **Agent office files** — User-editable markdown in `agent-office/` (gitignored except scaffold)
-- **Memory files** — `agent-office/MEMORY.md` and `agent-office/60_memory/*.md` stay on disk
-- **Attachments** — Processed in a temp directory (`/tmp/apple_flow_attachments` by default) and never persisted
-- **Phone numbers** — Scrubbed from logs; stored only in SQLite sessions table
-- **Logs** — Written to `logs/` directory (user-controlled)
+- **Runtime state DB**: defaults to `~/.apple-flow/relay.db` (`apple_flow_db_path`).
+- **iMessage source DB**: defaults to `~/Library/Messages/chat.db` (`apple_flow_messages_db_path`), read-only access.
+- **Agent office content**: Markdown/state under `agent-office/` (scaffold tracked, personal content generally gitignored).
+- **Memory**:
+- Legacy file memory can use `agent-office/MEMORY.md` and `agent-office/60_memory/*.md`.
+- Canonical memory v2 can use `apple_flow_memory_v2_db_path` (default empty means `<agent-office>/.apple-flow-memory.sqlite3`).
+- **Attachments**: when enabled, extracted to a temp workspace (default `/tmp/apple_flow_attachments`) for processing.
+- **Logs/audit**: local logs and optional CSV audit output (`apple_flow_csv_audit_log_path`).
 
-### Reporting a Vulnerability
+## Vulnerability Reporting
 
-If you discover a security vulnerability, please report it responsibly:
+Report security issues through GitHub Security Advisories:
 
-1. **Email**: Open a GitHub Security Advisory at https://github.com/dkyazzentwatwa/apple-flow/security/advisories
-2. **Do not** open a public issue for security vulnerabilities
-3. Include:
-   - Description of the vulnerability
-   - Steps to reproduce
-   - Potential impact
-   - Suggested fix (if any)
+- https://github.com/dkyazzentwatwa/apple-flow/security/advisories
 
-#### Response Timeline
+Do not open public issues for suspected vulnerabilities.
 
-- **Initial response**: Within 48 hours
-- **Triage**: Within 7 days
-- **Fix timeline**: Depends on severity (critical: 7 days, high: 14 days, medium: 30 days)
+### What to include
 
-### Security Best Practices for Users
+1. A clear description of the vulnerability.
+2. Affected versions or commit range (if known).
+3. Reproduction steps or proof-of-concept.
+4. Security impact (confidentiality, integrity, availability).
+5. Any proposed remediation ideas.
 
-1. **Limit allowed senders** — Only add your own phone number
-2. **Restrict workspaces** — Only add directories the AI should access
-3. **Review approvals** — Read the plan before approving `task:` or `project:` commands
-4. **Keep updated** — Run `git pull` regularly for security fixes
-5. **Audit logs** — Check `logs/apple-flow.err.log` periodically
-6. **Secure your Mac** — Enable FileVault, use a strong password, keep macOS updated
+### Disclosure expectations
 
-### Security Configuration Checklist
+1. Use private advisory reporting first.
+2. Give maintainers reasonable time to triage and prepare a fix.
+3. Coordinate public disclosure timing with maintainers when possible.
+
+### Response targets
+
+- Initial acknowledgement: within 48 hours.
+- Triage update: within 7 days.
+- Remediation timeline: severity-dependent and communicated during triage.
+
+## Security Best Practices
+
+1. Keep `apple_flow_allowed_senders` minimal (ideally only your own sender IDs).
+2. Keep `apple_flow_allowed_workspaces` narrow.
+3. Require review before approving `task:`/`project:` actions.
+4. Set `apple_flow_admin_api_token` for any enabled admin API deployment.
+5. Keep Apple Flow and connector tooling updated.
+6. Protect the host: FileVault, OS updates, strong local account hygiene.
+
+## Security Configuration Checklist
 
 ```env
-# Required for security
-apple_flow_allowed_senders=+15551234567        # Your phone only
-apple_flow_allowed_workspaces=/Users/you/code  # Limit AI access
-apple_flow_only_poll_allowed_senders=true      # Default: true
+# Baseline controls
+apple_flow_allowed_senders=+15551234567
+apple_flow_allowed_workspaces=/Users/you/code
+apple_flow_only_poll_allowed_senders=true
 
-# Recommended
-apple_flow_require_chat_prefix=false           # Natural mode (or true for strict)
-apple_flow_approval_ttl_minutes=20             # Shorter = more secure
-apple_flow_max_messages_per_minute=30          # Prevent abuse
-apple_flow_admin_api_token=<strong-random-secret>  # Protect admin API
+# Approval + abuse controls
+apple_flow_approval_ttl_minutes=20
+apple_flow_max_messages_per_minute=30
 
-# Optional integrations — restrict allowed senders/addresses separately
+# Intake mode
+apple_flow_require_chat_prefix=false
+
+# Admin API hardening
+apple_flow_admin_api_token=<strong-random-secret>
+
+# Optional integration hardening
 apple_flow_mail_allowed_senders=you@example.com
-apple_flow_reminders_auto_approve=false        # Require approval for reminder tasks
-apple_flow_notes_auto_approve=false            # Require approval for note tasks
-apple_flow_calendar_auto_approve=false         # Require approval for calendar tasks
+apple_flow_reminders_auto_approve=false
+apple_flow_notes_auto_approve=false
+apple_flow_calendar_auto_approve=false
 ```
 
-## Security Audit
+## Hardening Status
 
-AppleScript injection has been addressed across all egress paths (v0.2.0). All user-controlled strings are escaped before interpolation into AppleScript.
-
-**Hardened egress modules:**
-
-| Module | Escaping applied |
-|--------|-----------------|
-| `egress.py` | iMessage text: backslash + quote + newline |
-| `mail_egress.py` | Body, subject, recipient, from-address |
-| `notes_egress.py` | Folder name, note text, note ID |
-| `reminders_egress.py` | Reminder title and annotation |
-| `calendar_egress.py` | Event description and annotation |
-| `apple_tools.py` | CLI tool invocation via AppleScript |
-
-A formal third-party audit is still recommended before production use at scale.
+AppleScript escaping and approval sender verification are foundational controls in current releases. A third-party security audit is still recommended before high-risk or large-scale deployments.
 
 ---
 
-**Last updated**: 2026-02-20
+**Last updated**: 2026-03-05
