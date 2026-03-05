@@ -96,7 +96,8 @@ class IMessageEgress:
             return
 
         logger.info("Sending iMessage to %s (%s chars)", recipient, len(text))
-        for chunk in self._chunk(text):
+        chunks = self._chunk(text)
+        for chunk in chunks:
             last_error: Exception | None = None
             for attempt in range(1, self.retries + 1):
                 try:
@@ -111,3 +112,7 @@ class IMessageEgress:
                     time.sleep(0.25 * attempt)
             if last_error is not None:
                 raise RuntimeError(f"Failed to send iMessage after retries: {last_error}") from last_error
+        if len(chunks) > 1:
+            # Messages can store chunked sends as one merged bubble in chat.db.
+            # Keep a full-text marker so inbound echo checks match either shape.
+            self.mark_outbound(recipient, text)
