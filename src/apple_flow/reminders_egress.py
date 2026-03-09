@@ -11,6 +11,7 @@ import logging
 import subprocess
 
 logger = logging.getLogger("apple_flow.reminders_egress")
+REMINDERS_APP_TARGET = 'application id "com.apple.reminders"'
 
 
 class AppleRemindersEgress:
@@ -34,7 +35,7 @@ class AppleRemindersEgress:
         escaped_id = reminder_id.replace('"', '\\"')
 
         script = f'''
-        tell application "Reminders"
+        tell {REMINDERS_APP_TARGET}
             try
                 set taskList to list "{escaped_list}"
                 set matchedReminder to (first reminder of taskList whose id is "{escaped_id}")
@@ -91,7 +92,7 @@ class AppleRemindersEgress:
         escaped_id = reminder_id.replace('"', '\\"')
 
         script = f'''
-        tell application "Reminders"
+        tell {REMINDERS_APP_TARGET}
             try
                 set taskList to list "{escaped_list}"
                 set matchedReminder to (first reminder of taskList whose id is "{escaped_id}")
@@ -158,7 +159,7 @@ class AppleRemindersEgress:
         escaped_id = reminder_id.replace('"', '\\"')
 
         script = f'''
-        tell application "Reminders"
+        tell {REMINDERS_APP_TARGET}
             try
                 set sourceList to list "{escaped_source_list}"
                 set archiveList to list "{escaped_archive_list}"

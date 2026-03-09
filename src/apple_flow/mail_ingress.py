@@ -15,6 +15,7 @@ from .models import InboundMessage
 from .utils import normalize_sender
 
 logger = logging.getLogger("apple_flow.mail_ingress")
+MAIL_APP_TARGET = 'application id "com.apple.mail"'
 
 
 class AppleMailIngress:
@@ -179,7 +180,7 @@ class AppleMailIngress:
             return txt
         end sanitise
 
-        tell application "Mail"
+        tell {MAIL_APP_TARGET}
             set maxCount to {int(limit)}
             set outputLines to {{}}
             set maxAgeDays to {int(self.max_age_days)}
@@ -330,7 +331,7 @@ class AppleMailIngress:
 '''
 
         id_lines = "\n".join(_id_block(mid) for mid in sanitized_ids)
-        script = f'''tell application "Mail"
+        script = f'''tell {MAIL_APP_TARGET}
 \tset outputLines to {{}}
 {id_lines}
 \tset AppleScript's text item delimiters to character id 10

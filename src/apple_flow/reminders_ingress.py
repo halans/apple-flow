@@ -19,6 +19,7 @@ from .protocols import StoreProtocol
 from .utils import normalize_sender
 
 logger = logging.getLogger("apple_flow.reminders_ingress")
+REMINDERS_APP_TARGET = 'application id "com.apple.reminders"'
 
 # Store keys for tracking processed reminders.
 _PROCESSED_IDS_KEY = "reminders_processed_ids"
@@ -213,7 +214,7 @@ class AppleRemindersIngress:
             return txt
         end sanitise
 
-        tell application "Reminders"
+        tell {REMINDERS_APP_TARGET}
             set maxCount to {int(limit)}
             set outputLines to {{}}
 

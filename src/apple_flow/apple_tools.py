@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("apple_flow.apple_tools")
+MAIL_APP_TARGET = 'application id "com.apple.mail"'
+REMINDERS_APP_TARGET = 'application id "com.apple.reminders"'
 PAGES_APP_IDS = ("com.apple.Pages", "com.apple.iWork.Pages")
 PAGES_APP_TARGETS = (
     'application id "com.apple.Pages"',
@@ -3280,7 +3282,7 @@ def _mail_fetch_raw(
         return txt
     end sanitise
 
-    tell application "Mail"
+    tell {MAIL_APP_TARGET}
         set maxCount to {int(limit)}
         set maxAgeDays to {int(max_age_days)}
         set cutoffDate to (current date) - (maxAgeDays * days)
@@ -3388,7 +3390,7 @@ def mail_get_content(message_id: str, account: str = "", mailbox: str = "INBOX")
         mailbox_ref = "inbox"
 
     script = f'''
-    tell application "Mail"
+    tell {MAIL_APP_TARGET}
         try
             set matchedMsg to first message of {mailbox_ref} whose {id_match}
             return content of matchedMsg as text
@@ -3417,7 +3419,7 @@ def mail_send(to_address: str, subject: str, body: str, account: str = "") -> bo
         account_clause = ""
 
     script = f'''
-    tell application "Mail"
+    tell {MAIL_APP_TARGET}
         try
             set newMsg to make new outgoing message with properties {{subject:"{esc_subject}", content:"{esc_body}", visible:false}}
             {account_clause}
@@ -3524,7 +3526,7 @@ def mail_list_mailboxes(
         end appendMailboxRows
     end using terms from
 
-    tell application "Mail"
+    tell {MAIL_APP_TARGET}
         set outputLines to {{}}
         {fetch_block}
         repeat with acc in targetAccounts
@@ -3800,7 +3802,7 @@ def mail_move_to_label(
             end findMailboxByPath
         end using terms from
 
-        tell application "Mail"
+        tell {MAIL_APP_TARGET}
             try
                 set sourceBox to {source_ref}
                 if "{esc_dest_account}" is not "" then
@@ -3911,11 +3913,12 @@ def mail_move_to_label(
 
 def reminders_list_lists() -> list[str]:
     """Return a list of all Reminders list names."""
-    script = '''
-    tell application "Reminders"
-        set listNames to {}
-        repeat with lst in every list
-            set end of listNames to name of lst as text
+    script = f'''
+    tell {REMINDERS_APP_TARGET}
+        set listNames to {{}}
+        set reminderLists to lists
+        repeat with reminderList in reminderLists
+            set end of listNames to (name of reminderList as text)
         end repeat
         set AppleScript's text item delimiters to "|||"
         return listNames as text
@@ -3950,8 +3953,9 @@ def _reminders_fetch_raw(list_name: str = "", filter_completed: str = "incomplet
         # Iterate all lists
         fetch_block = f'''
             set allReminders to {{}}
-            repeat with lst in every list
-                set allReminders to allReminders & (every reminder of lst {completion_clause})
+            set reminderLists to lists
+            repeat with reminderList in reminderLists
+                set allReminders to allReminders & (every reminder of reminderList {completion_clause})
             end repeat
         '''
 
@@ -3973,7 +3977,7 @@ def _reminders_fetch_raw(list_name: str = "", filter_completed: str = "incomplet
         return txt
     end sanitise
 
-    tell application "Reminders"
+    tell {REMINDERS_APP_TARGET}
         set maxCount to {int(limit)}
         set outputLines to {{}}
         {fetch_block}
@@ -4105,7 +4109,7 @@ def reminders_create(
         due_clause = ""
 
     script = f'''
-    tell application "Reminders"
+    tell {REMINDERS_APP_TARGET}
         try
             set targetList to list "{esc_list}"
         on error
@@ -4133,7 +4137,7 @@ def reminders_complete(reminder_id: str, list_name: str) -> bool:
     esc_list = list_name.replace('"', '\\"')
 
     script = f'''
-    tell application "Reminders"
+    tell {REMINDERS_APP_TARGET}
         try
             set targetList to list "{esc_list}"
             set matchedRem to first reminder of targetList whose id as text is "{esc_id}"

@@ -1490,6 +1490,19 @@ class TestRemindersListLists:
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("osascript", 30)):
             assert reminders_list_lists() == []
 
+    def test_script_uses_explicit_reminder_list_iteration(self):
+        captured: dict[str, str] = {}
+
+        def _capture(cmd, **_kwargs):
+            captured["script"] = cmd[2]
+            return _ok_result("Reminders")
+
+        with patch("subprocess.run", side_effect=_capture):
+            reminders_list_lists()
+
+        assert "set reminderLists to lists" in captured["script"]
+        assert "repeat with reminderList in reminderLists" in captured["script"]
+
 
 class TestRemindersList:
     def test_returns_list(self):
@@ -1521,6 +1534,18 @@ class TestRemindersList:
     def test_returns_empty_on_malformed_input(self):
         with patch("subprocess.run", return_value=_ok_result("id-1\ttoo-few-fields")):
             assert reminders_list() == []
+
+    def test_named_list_fetch_uses_name_lookup_in_script(self):
+        captured: dict[str, str] = {}
+
+        def _capture(cmd, **_kwargs):
+            captured["script"] = cmd[2]
+            return _ok_result("")
+
+        with patch("subprocess.run", side_effect=_capture):
+            reminders_list(list_name="agent-task")
+
+        assert 'set targetList to list "agent-task"' in captured["script"]
 
 
 class TestRemindersSearch:
