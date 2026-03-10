@@ -5,6 +5,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .osascript_utils import run_osascript_with_recovery
+
 
 @dataclass(frozen=True)
 class EnsureResult:
@@ -38,25 +40,30 @@ def _run_osascript(script: str, timeout_seconds: float = 12.0) -> subprocess.Com
 
 
 def _ensure_via_applescript(script: str) -> EnsureResult:
-    try:
-        result = _run_osascript(script)
-        if result.returncode != 0:
-            detail = (result.stderr or "").strip() or f"osascript exit code {result.returncode}"
-            return EnsureResult(status="failed", detail=detail)
-        marker = (result.stdout or "").strip().lower()
-        if marker == "created":
-            return EnsureResult(status="created")
-        if marker == "exists":
-            return EnsureResult(status="exists")
-        if marker:
-            return EnsureResult(status="failed", detail=f"unexpected output: {marker}")
-        return EnsureResult(status="failed", detail="empty AppleScript output")
-    except subprocess.TimeoutExpired:
-        return EnsureResult(status="failed", detail="timed out")
-    except FileNotFoundError:
-        return EnsureResult(status="failed", detail="osascript not found (requires macOS)")
-    except OSError as exc:
-        return EnsureResult(status="failed", detail=f"os error: {exc}")
+    app_name = ""
+    if 'tell application "Reminders"' in script:
+        app_name = "Reminders"
+    elif 'tell application "Notes"' in script:
+        app_name = "Notes"
+    elif 'tell application "Calendar"' in script:
+        app_name = "Calendar"
+
+    result = run_osascript_with_recovery(
+        script,
+        app_name=app_name,
+        timeout=12.0,
+        max_attempts=3,
+    )
+    if not result.ok:
+        return EnsureResult(status="failed", detail=result.detail)
+    marker = result.stdout.strip().lower()
+    if marker == "created":
+        return EnsureResult(status="created")
+    if marker == "exists":
+        return EnsureResult(status="exists")
+    if marker:
+        return EnsureResult(status="failed", detail=f"unexpected output: {marker}")
+    return EnsureResult(status="failed", detail="empty AppleScript output")
 
 
 def ensure_reminders_list(list_name: str) -> EnsureResult:

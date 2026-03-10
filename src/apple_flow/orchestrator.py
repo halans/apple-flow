@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from .approval import ApprovalHandler, OrchestrationResult
 from .commanding import CommandKind, ParsedCommand, is_likely_mutating, parse_command
+from .gateway_health import summarize_gateway_health_lines
 from .models import InboundMessage, RunState
 from .notes_logging import log_to_notes
 from .protocols import ConnectorProtocol, EgressProtocol, StoreProtocol
@@ -538,6 +539,11 @@ class RelayOrchestrator:
                 parts.append(status)
             except (ValueError, TypeError):
                 parts.append("Companion: enabled (no check recorded yet)")
+
+        gateway_lines = summarize_gateway_health_lines(self.store)
+        if gateway_lines:
+            parts.append("Gateways:")
+            parts.extend(gateway_lines)
 
         response = "\n".join(parts)
         self._send(sender, response, context=context)

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import apple_flow.daemon as daemon_module
+from conftest import FakeStore
 from apple_flow.attachments import AttachmentProcessor
 from apple_flow.commanding import CommandKind
 from apple_flow.config import RelaySettings
@@ -549,6 +550,51 @@ async def test_mail_poll_loop_skips_reprocessing_inflight_email():
 
     await daemon._poll_mail_loop()
     assert handled == 1
+
+
+@pytest.mark.asyncio
+async def test_reminders_poll_loop_marks_processed_only_after_success():
+    daemon = RelayDaemon.__new__(RelayDaemon)
+    daemon._shutdown_requested = False
+    daemon._concurrency_sem = asyncio.Semaphore(2)
+    daemon.settings = SimpleNamespace(reminders_list_name="agent-task", reminders_archive_list_name="agent-archive", reminders_poll_interval_seconds=0)
+    daemon._inflight_dispatch_tasks = set()
+
+    inbound = InboundMessage(
+        id="reminder_42",
+        sender="+15551234567",
+        text="task: do the thing",
+        received_at="2026-01-01T00:00:00Z",
+        is_from_me=False,
+        context={"reminder_id": "rem-42", "occurrence_key": "rem-42|", "reminder_name": "do the thing"},
+    )
+
+    marked: list[str] = []
+
+    def _fetch_new():
+        daemon._shutdown_requested = True
+        return [inbound]
+
+    daemon.reminders_ingress = SimpleNamespace(
+        fetch_new=_fetch_new,
+        mark_processed_occurrence=lambda key: marked.append(key),
+        last_fetch_error="",
+    )
+    daemon.reminders_egress = SimpleNamespace(
+        annotate_reminder=lambda *args, **kwargs: None,
+        move_to_archive=lambda *args, **kwargs: None,
+    )
+    daemon.store = FakeStore()
+
+    class _FakeReminderOrchestrator:
+        def handle_message(self, _msg):
+            raise RuntimeError("connector unavailable")
+
+    daemon.reminders_orchestrator = _FakeReminderOrchestrator()
+
+    await daemon._poll_reminders_loop()
+
+    assert marked == []
 
 
 @pytest.mark.asyncio

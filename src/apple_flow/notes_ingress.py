@@ -10,10 +10,10 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
-import time
 from datetime import datetime, timezone
 
 from .models import InboundMessage
+from .osascript_utils import run_osascript_with_recovery
 from .protocols import StoreProtocol
 from .utils import normalize_sender
 
@@ -45,6 +45,7 @@ class AppleNotesIngress:
         self.fetch_retry_delay_seconds = max(0.0, float(fetch_retry_delay_seconds))
         self._store = store
         self._processed_ids: set[str] = set()
+        self.last_fetch_error: str = ""
         if store is not None:
             raw = store.get_state(_PROCESSED_IDS_KEY)
             if raw:
@@ -215,42 +216,20 @@ class AppleNotesIngress:
         end tell
         '''
 
-        max_attempts = self.fetch_retries + 1
-        for attempt in range(1, max_attempts + 1):
-            try:
-                result = subprocess.run(
-                    ["osascript", "-e", script],
-                    capture_output=True,
-                    text=True,
-                    timeout=self.fetch_timeout_seconds,
-                )
-                if result.returncode != 0:
-                    logger.warning("Notes AppleScript failed (rc=%s): %s", result.returncode, result.stderr.strip())
-                    return []
-                output = result.stdout.strip()
-                if not output:
-                    return []
-                return self._parse_tab_delimited(output)
-            except subprocess.TimeoutExpired:
-                if attempt >= max_attempts:
-                    logger.warning(
-                        "Notes AppleScript fetch timed out after %d attempt(s)", max_attempts
-                    )
-                    return []
-                logger.warning(
-                    "Notes AppleScript fetch timed out (attempt %d/%d); retrying in %.1fs",
-                    attempt,
-                    max_attempts,
-                    self.fetch_retry_delay_seconds,
-                )
-                time.sleep(self.fetch_retry_delay_seconds)
-            except FileNotFoundError:
-                logger.warning("osascript not found — Apple Notes ingress requires macOS")
-                return []
-            except Exception as exc:
-                logger.warning("Unexpected error fetching notes: %s", exc)
-                return []
-        return []
+        result = run_osascript_with_recovery(
+            script,
+            app_name="Notes",
+            timeout=self.fetch_timeout_seconds,
+            max_attempts=self.fetch_retries + 1,
+            backoff_seconds=self.fetch_retry_delay_seconds,
+        )
+        if not result.ok:
+            self.last_fetch_error = result.detail
+            return []
+        self.last_fetch_error = ""
+        if not result.stdout:
+            return []
+        return self._parse_tab_delimited(result.stdout)
 
     @staticmethod
     def _parse_tab_delimited(output: str) -> list[dict[str, str]]:

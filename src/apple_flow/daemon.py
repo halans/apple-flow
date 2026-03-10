@@ -25,6 +25,7 @@ from .companion import CompanionLoop
 from .config import RelaySettings
 from .csv_audit import CsvAuditLogger
 from .egress import IMessageEgress
+from .gateway_health import gateway_health_payload, gateway_health_state_key, now_utc_iso
 from .gateway_setup import ensure_gateway_resources
 from .gemini_cli_connector import GeminiCliConnector
 from .ingress import IMessageIngress
@@ -587,7 +588,10 @@ class RelayDaemon:
         statuses = gateway_resource_statuses_for_settings(self.settings)
         for status in statuses:
             detail = f" ({status.result.detail})" if status.result.detail else ""
+            gateway = self._gateway_name_from_label(status.label)
             if status.result.status == "failed":
+                if gateway and hasattr(self, "store"):
+                    self._record_gateway_failure(gateway, status.result.detail or status.result.status)
                 logger.warning(
                     "Gateway resource ensure failed: %s '%s': %s%s",
                     status.label,
@@ -596,6 +600,8 @@ class RelayDaemon:
                     detail,
                 )
                 continue
+            if gateway and hasattr(self, "store"):
+                self._record_gateway_success(gateway)
             logger.info(
                 "Gateway resource ensure: %s '%s': %s%s",
                 status.label,
@@ -603,6 +609,67 @@ class RelayDaemon:
                 status.result.status,
                 detail,
             )
+
+    @staticmethod
+    def _gateway_name_from_label(label: str) -> str:
+        lowered = label.lower()
+        if "mail" in lowered:
+            return "mail"
+        if "reminders" in lowered:
+            return "reminders"
+        if "notes" in lowered:
+            return "notes"
+        if "calendar" in lowered:
+            return "calendar"
+        return ""
+
+    def _record_gateway_success(self, gateway: str) -> None:
+        if not gateway or not hasattr(self, "store"):
+            return
+        previous_raw = self.store.get_state(gateway_health_state_key(gateway))
+        previous_healthy = True
+        previous_reason = ""
+        if previous_raw:
+            try:
+                previous = json.loads(previous_raw)
+                previous_healthy = bool(previous.get("healthy", True))
+                previous_reason = str(previous.get("last_failure_reason", ""))
+            except (TypeError, ValueError):
+                previous_healthy = True
+        self.store.set_state(
+            gateway_health_state_key(gateway),
+            gateway_health_payload(
+                healthy=True,
+                last_success_at=now_utc_iso(),
+                last_failure_reason="" if previous_healthy else previous_reason,
+            ),
+        )
+        if not previous_healthy:
+            logger.info("Gateway recovered: %s", gateway)
+
+    def _record_gateway_failure(self, gateway: str, reason: str) -> None:
+        if not gateway or not hasattr(self, "store"):
+            return
+        previous_raw = self.store.get_state(gateway_health_state_key(gateway))
+        previous_healthy = True
+        previous_reason = ""
+        if previous_raw:
+            try:
+                previous = json.loads(previous_raw)
+                previous_healthy = bool(previous.get("healthy", True))
+                previous_reason = str(previous.get("last_failure_reason", ""))
+            except (TypeError, ValueError):
+                previous_healthy = True
+        self.store.set_state(
+            gateway_health_state_key(gateway),
+            gateway_health_payload(
+                healthy=False,
+                last_failure_at=now_utc_iso(),
+                last_failure_reason=reason,
+            ),
+        )
+        if previous_healthy or previous_reason != reason:
+            logger.warning("Gateway degraded: %s (%s)", gateway, reason)
 
     def request_shutdown(self) -> None:
         """Request graceful shutdown of the daemon."""
@@ -1132,6 +1199,10 @@ class RelayDaemon:
                     sender_allowlist=mail_allowlist,
                     require_sender_filter=bool(mail_allowlist),
                 )
+                if getattr(self.mail_ingress, "last_fetch_error", ""):
+                    self._record_gateway_failure("mail", self.mail_ingress.last_fetch_error)
+                else:
+                    self._record_gateway_success("mail")
                 dispatchable_mail = []
                 suppressed_empty = 0
                 suppressed_echo = 0
@@ -1249,6 +1320,10 @@ class RelayDaemon:
         while not self._shutdown_requested:
             try:
                 messages = self.reminders_ingress.fetch_new()
+                if getattr(self.reminders_ingress, "last_fetch_error", ""):
+                    self._record_gateway_failure("reminders", self.reminders_ingress.last_fetch_error)
+                else:
+                    self._record_gateway_success("reminders")
                 dispatchable_reminders = []
                 for msg in messages:
                     if self._shutdown_requested:
@@ -1268,7 +1343,6 @@ class RelayDaemon:
                         len(msg.text),
                     )
 
-                    self.reminders_ingress.mark_processed_occurrence(occurrence_key)
                     dispatchable_reminders.append(msg)
 
                 async def _dispatch_reminder(msg):
@@ -1278,6 +1352,7 @@ class RelayDaemon:
                             result = await asyncio.to_thread(self.reminders_orchestrator.handle_message, msg)
                             duration = time.monotonic() - started_at
                             reminder_id = msg.context.get("reminder_id", "")
+                            occurrence_key = msg.context.get("occurrence_key", "") or f"{reminder_id}|"
                             logger.info(
                                 "Handled reminder id=%s kind=%s run_id=%s duration=%.2fs",
                                 msg.id,
@@ -1299,6 +1374,8 @@ class RelayDaemon:
                                         source_list_name=list_name,
                                         archive_list_name=self.settings.reminders_archive_list_name,
                                     )
+                            if occurrence_key:
+                                self.reminders_ingress.mark_processed_occurrence(occurrence_key)
                         except Exception as exc:
                             logger.exception(
                                 "Unhandled reminders dispatch failure id=%s sender=%s: %s",
@@ -1326,6 +1403,10 @@ class RelayDaemon:
         while not self._shutdown_requested:
             try:
                 messages = await asyncio.to_thread(self.notes_ingress.fetch_new)
+                if getattr(self.notes_ingress, "last_fetch_error", ""):
+                    self._record_gateway_failure("notes", self.notes_ingress.last_fetch_error)
+                else:
+                    self._record_gateway_success("notes")
                 dispatchable_notes = []
                 for msg in messages:
                     if self._shutdown_requested:
@@ -1389,6 +1470,10 @@ class RelayDaemon:
         while not self._shutdown_requested:
             try:
                 messages = self.calendar_ingress.fetch_new()
+                if getattr(self.calendar_ingress, "last_fetch_error", ""):
+                    self._record_gateway_failure("calendar", self.calendar_ingress.last_fetch_error)
+                else:
+                    self._record_gateway_success("calendar")
                 dispatchable_calendar = []
                 for msg in messages:
                     if self._shutdown_requested:
@@ -1400,7 +1485,6 @@ class RelayDaemon:
                     event_summary = msg.context.get("event_summary", "")
                     logger.info("Inbound calendar event id=%s summary=%r chars=%s", msg.id, event_summary, len(msg.text))
 
-                    self.calendar_ingress.mark_processed(event_id)
                     dispatchable_calendar.append(msg)
 
                 async def _dispatch_calendar(msg):
@@ -1419,6 +1503,8 @@ class RelayDaemon:
                                     )
                                 else:
                                     self.calendar_egress.annotate_event(event_id, result.response)
+                            if event_id:
+                                self.calendar_ingress.mark_processed(event_id)
                         except Exception as exc:
                             logger.exception(
                                 "Unhandled calendar dispatch failure id=%s sender=%s: %s",

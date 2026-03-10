@@ -129,3 +129,27 @@ def test_health_companion_muted_flag():
     )
     result = orch.handle_message(msg)
     assert "MUTED" in result.response
+
+
+def test_health_shows_gateway_degradation():
+    store = FakeStore()
+    store.set_state(
+        "gateway_health_notes",
+        '{"healthy": false, "last_failure_reason": "Connection invalid", "last_failure_at": "2026-03-10T12:00:00+00:00"}',
+    )
+    store.set_state(
+        "gateway_health_reminders",
+        '{"healthy": true, "last_success_at": "2026-03-10T12:05:00+00:00"}',
+    )
+    orch = _make_orchestrator(store=store)
+
+    msg = InboundMessage(
+        id="m1", sender="+15551234567", text="health",
+        received_at="2026-02-17T12:00:00Z", is_from_me=False,
+    )
+    result = orch.handle_message(msg)
+
+    assert "Gateways:" in result.response
+    assert "Notes: DEGRADED" in result.response
+    assert "Connection invalid" in result.response
+    assert "Reminders: OK" in result.response

@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from .config import RelaySettings
 from .csv_audit import CsvAuditLogger
+from .gateway_health import read_all_gateway_health
 from .models import InboundMessage
 from .store import SQLiteStore
 
@@ -80,8 +81,8 @@ def build_app(store: Any | None = None) -> FastAPI:
     app.state.orchestrator = None
 
     @app.get("/health")
-    def health() -> dict[str, str]:
-        return {"status": "ok"}
+    def health() -> dict[str, Any]:
+        return {"status": "ok", "gateways": read_all_gateway_health(app.state.store)}
 
     @app.get("/sessions", dependencies=[Depends(verify_token)])
     def sessions() -> list[dict[str, Any]]:

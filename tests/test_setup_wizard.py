@@ -31,24 +31,24 @@ def test_resolve_binary_uses_local_bin_fallback(monkeypatch, tmp_path):
 def test_ensure_via_applescript_handles_created_exists_and_failed(monkeypatch):
     monkeypatch.setattr(
         gateway_setup,
-        "_run_osascript",
-        lambda _script: subprocess.CompletedProcess(args=[], returncode=0, stdout="created\n", stderr=""),
+        "run_osascript_with_recovery",
+        lambda *_args, **_kwargs: type("R", (), {"ok": True, "stdout": "created", "detail": ""})(),
     )
-    assert gateway_setup._ensure_via_applescript("test").status == "created"
+    assert gateway_setup._ensure_via_applescript('tell application "Notes" to return "created"').status == "created"
 
     monkeypatch.setattr(
         gateway_setup,
-        "_run_osascript",
-        lambda _script: subprocess.CompletedProcess(args=[], returncode=0, stdout="exists\n", stderr=""),
+        "run_osascript_with_recovery",
+        lambda *_args, **_kwargs: type("R", (), {"ok": True, "stdout": "exists", "detail": ""})(),
     )
-    assert gateway_setup._ensure_via_applescript("test").status == "exists"
+    assert gateway_setup._ensure_via_applescript('tell application "Calendar" to return "exists"').status == "exists"
 
     monkeypatch.setattr(
         gateway_setup,
-        "_run_osascript",
-        lambda _script: subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="permission denied"),
+        "run_osascript_with_recovery",
+        lambda *_args, **_kwargs: type("R", (), {"ok": False, "stdout": "", "detail": "permission denied"})(),
     )
-    failed = gateway_setup._ensure_via_applescript("test")
+    failed = gateway_setup._ensure_via_applescript('tell application "Reminders" to return "failed"')
     assert failed.status == "failed"
     assert "permission denied" in failed.detail
 

@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .models import InboundMessage
+from .osascript_utils import run_osascript_with_recovery
 from .protocols import StoreProtocol
 from .utils import normalize_sender
 
@@ -48,6 +49,7 @@ class AppleRemindersIngress:
         self._tzinfo = self._load_timezone(self.timezone_name)
         self._store = store
         self._processed_occurrences: set[str] = set()
+        self.last_fetch_error: str = ""
         # Hydrate processed occurrence keys from persistent store on startup.
         if store is not None:
             raw_occurrences = store.get_state(_PROCESSED_OCCURRENCES_KEY)
@@ -288,34 +290,20 @@ class AppleRemindersIngress:
         end tell
         '''
 
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode != 0:
-                logger.warning(
-                    "Reminders AppleScript failed (rc=%s): %s",
-                    result.returncode,
-                    result.stderr.strip(),
-                )
-                return []
-            # Preserve trailing tab-delimited empty fields (e.g. missing due_date).
-            output = result.stdout.rstrip("\r\n")
-            if not output:
-                return []
-            return self._parse_tab_delimited(output)
-        except subprocess.TimeoutExpired:
-            logger.warning("Reminders AppleScript fetch timed out")
+        result = run_osascript_with_recovery(
+            script,
+            app_name="Reminders",
+            timeout=30.0,
+            max_attempts=3,
+        )
+        if not result.ok:
+            self.last_fetch_error = result.detail
             return []
-        except FileNotFoundError:
-            logger.warning("osascript not found — Apple Reminders ingress requires macOS")
+        self.last_fetch_error = ""
+        output = result.stdout.rstrip("\r\n")
+        if not output:
             return []
-        except Exception as exc:
-            logger.warning("Unexpected error fetching reminders: %s", exc)
-            return []
+        return self._parse_tab_delimited(output)
 
     @staticmethod
     def _parse_tab_delimited(output: str) -> list[dict[str, str]]:

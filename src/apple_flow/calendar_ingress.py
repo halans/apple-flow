@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .models import InboundMessage
+from .osascript_utils import run_osascript_with_recovery
 from .protocols import StoreProtocol
 from .utils import normalize_sender
 
@@ -43,6 +44,7 @@ class AppleCalendarIngress:
         self.trigger_tag = trigger_tag.strip()
         self._store = store
         self._processed_ids: set[str] = set()
+        self.last_fetch_error: str = ""
         if store is not None:
             raw = store.get_state(_PROCESSED_IDS_KEY)
             if raw:
@@ -262,29 +264,19 @@ class AppleCalendarIngress:
         end tell
         '''
 
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode != 0:
-                logger.warning("Calendar AppleScript failed (rc=%s): %s", result.returncode, result.stderr.strip())
-                return []
-            output = result.stdout.strip()
-            if not output:
-                return []
-            return self._parse_tab_delimited(output)
-        except subprocess.TimeoutExpired:
-            logger.warning("Calendar AppleScript fetch timed out")
+        result = run_osascript_with_recovery(
+            script,
+            app_name="Calendar",
+            timeout=30.0,
+            max_attempts=3,
+        )
+        if not result.ok:
+            self.last_fetch_error = result.detail
             return []
-        except FileNotFoundError:
-            logger.warning("osascript not found — Calendar ingress requires macOS")
+        self.last_fetch_error = ""
+        if not result.stdout:
             return []
-        except Exception as exc:
-            logger.warning("Unexpected error fetching calendar events: %s", exc)
-            return []
+        return self._parse_tab_delimited(result.stdout)
 
     @staticmethod
     def _parse_tab_delimited(output: str) -> list[dict[str, str]]:

@@ -12,6 +12,7 @@ import subprocess
 from datetime import datetime, timezone
 
 from .models import InboundMessage
+from .osascript_utils import run_osascript_with_recovery
 from .utils import normalize_sender
 
 logger = logging.getLogger("apple_flow.mail_ingress")
@@ -27,6 +28,7 @@ class AppleMailIngress:
         self.max_age_days = max_age_days
         self.trigger_tag = trigger_tag.strip()
         self._last_seen_ids: set[str] = set()
+        self.last_fetch_error: str = ""
 
     def fetch_new(
         self,
@@ -222,29 +224,19 @@ class AppleMailIngress:
         end tell
         '''
 
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode != 0:
-                logger.warning("AppleScript fetch failed (rc=%s): %s", result.returncode, result.stderr.strip())
-                return []
-            output = result.stdout.strip()
-            if not output:
-                return []
-            return self._parse_tab_delimited(output)
-        except subprocess.TimeoutExpired:
-            logger.warning("AppleScript fetch timed out")
+        result = run_osascript_with_recovery(
+            script,
+            app_name="Mail",
+            timeout=30.0,
+            max_attempts=3,
+        )
+        if not result.ok:
+            self.last_fetch_error = result.detail
             return []
-        except FileNotFoundError:
-            logger.warning("osascript not found - Apple Mail ingress requires macOS")
+        self.last_fetch_error = ""
+        if not result.stdout:
             return []
-        except Exception as exc:
-            logger.warning("Unexpected error fetching mail: %s", exc)
-            return []
+        return self._parse_tab_delimited(result.stdout)
 
     @staticmethod
     def _parse_tab_delimited(output: str) -> list[dict[str, str]]:
